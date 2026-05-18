@@ -1,0 +1,18 @@
+node_modules/
+out/
+*.vsix
+.vscode-test/
+preview.html
+.DS_Store
+releases/
+.env
+*.bak.*
+
+# Heavy source asset packs kept out of git. The extension uses the slim
+# bundled assets under assets/pixel/office, assets/pixel/interior, and
+# assets/pixel/characters/*.png.
+assets/pixel/moderninteriors-win/
+assets/pixel/modernexteriors-win/
+assets/pixel/Modern_Office_Revamped_v1/
+assets/pixel/characters/moderninteriors-win/
+assets/pixel/characters/Modern_Office_Revamped_v1/
