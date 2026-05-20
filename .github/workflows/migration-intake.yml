@@ -1,0 +1,174 @@
+name: Migration Intake
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repository:
+        description: "Owner/repo for the upstream or fork sync source"
+        required: false
+        default: "ahnharam/connect-ai"
+      upstream_pr_url:
+        description: "URL of the upstream sync PR or source PR"
+        required: false
+        default: ""
+      upstream_base_sha:
+        description: "Base SHA before the upstream change range"
+        required: false
+        default: ""
+      upstream_head_sha:
+        description: "Head SHA after the upstream change range"
+        required: false
+        default: ""
+      changed_files:
+        description: "Changed files, one per line if known"
+        required: false
+        default: ""
+      risk_notes:
+        description: "Known compatibility risks or review notes"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: migration-intake-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-intake-pr:
+    name: Create migration intake PR
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout Haram repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare migration report
+        id: report
+        shell: bash
+        env:
+          UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository }}
+          UPSTREAM_PR_URL: ${{ inputs.upstream_pr_url }}
+          UPSTREAM_BASE_SHA: ${{ inputs.upstream_base_sha }}
+          UPSTREAM_HEAD_SHA: ${{ inputs.upstream_head_sha }}
+          CHANGED_FILES: ${{ inputs.changed_files }}
+          RISK_NOTES: ${{ inputs.risk_notes }}
+        run: |
+          timestamp="$(date -u +%Y%m%d-%H%M)"
+          head_short="manual"
+          if [ -n "$UPSTREAM_HEAD_SHA" ]; then
+            head_short="${UPSTREAM_HEAD_SHA:0:12}"
+          fi
+
+          branch="migration/upstream-${timestamp}-${head_short}"
+          report_path="docs/migration-reports/upstream-${timestamp}-${head_short}.md"
+          base_branch="${GITHUB_REF_NAME:-master}"
+
+          files="$CHANGED_FILES"
+          notes="$RISK_NOTES"
+          [ -n "$files" ] || files="_Not provided. Fill this from the fork sync PR before review._"
+          [ -n "$notes" ] || notes="_No known risks provided yet._"
+
+          git checkout -B "$branch"
+          mkdir -p "$(dirname "$report_path")"
+
+          cat > "$report_path" <<EOF
+          # Upstream Migration Intake
+
+          ## Source
+
+          - Upstream repository: \`${UPSTREAM_REPOSITORY:-ahnharam/connect-ai}\`
+          - Upstream PR or sync PR: ${UPSTREAM_PR_URL:-_Not provided._}
+          - Upstream base SHA: \`${UPSTREAM_BASE_SHA:-not provided}\`
+          - Upstream head SHA: \`${UPSTREAM_HEAD_SHA:-not provided}\`
+          - Target Haram branch: \`$base_branch\`
+          - Intake created at UTC: \`$timestamp\`
+
+          ## Changed Files
+
+          $files
+
+          ## Initial Risk Notes
+
+          $notes
+
+          ## Required Compatibility Gates
+
+          - Preserve \`Haram AI Agent -- AI Software Company\` product identity.
+          - Preserve \`haram-ai-agent\` extension name.
+          - Preserve \`haramAi.*\` settings prefix.
+          - Preserve \`haram-ai-agent.*\` or \`haramAi.*\` command namespace.
+          - Preserve \`~/.haram-ai-brain\` default brain path.
+          - Preserve \`<brain>/_company\` default company directory.
+          - Preserve the 9-agent model: \`ceo\`, \`business\`, \`planner\`, \`architect\`, \`designer\`, \`frontend\`, \`backend\`, \`dba\`, \`qa\`.
+          - Do not re-expose YouTube, Instagram, PayPal, content operations, comment queues, or channel analytics in the v0 default flow.
+
+          ## Verification Checklist
+
+          - [ ] \`npm install\`
+          - [ ] \`npm run compile\`
+          - [ ] \`npm audit\`
+          - [ ] Legacy exposure scan:
+            \`rg "connectAiLab|connect-ai|YouTube|Instagram|PayPal|channel|comment queue" .\`
+          - [ ] Haram identifier scan:
+            \`rg "haram-ai-agent|haramAi|Haram AI Agent|.haram-ai-brain" .\`
+          - [ ] Agent-role scan:
+            \`rg "ceo|business|planner|architect|designer|frontend|backend|dba|qa" src\`
+          EOF
+
+          git add "$report_path"
+          git commit -m "docs: add upstream migration intake report"
+          git push --set-upstream origin "$branch"
+
+          {
+            echo "branch=$branch"
+            echo "report_path=$report_path"
+            echo "base_branch=$base_branch"
+            echo "head_short=$head_short"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create migration labels
+        shell: bash
+        run: |
+          gh label create migration-candidate --color 8250DF --description "Candidate for Haram migration review" --force || true
+          gh label create needs-human-review --color D1242F --description "Requires manual compatibility review" --force || true
+
+      - name: Create migration pull request
+        shell: bash
+        run: |
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          ## Migration intake
+
+          This PR records an upstream migration candidate for local Codex review.
+          It does not apply upstream code automatically.
+
+          - Report: \`${{ steps.report.outputs.report_path }}\`
+          - Source repository: \`${{ inputs.upstream_repository }}\`
+          - Source PR: ${{ inputs.upstream_pr_url || '_Not provided._' }}
+          - Upstream base SHA: \`${{ inputs.upstream_base_sha || 'not provided' }}\`
+          - Upstream head SHA: \`${{ inputs.upstream_head_sha || 'not provided' }}\`
+
+          Use the migration PR template checklist before applying code changes.
+          EOF
+
+          gh pr create \
+            --base "${{ steps.report.outputs.base_branch }}" \
+            --head "${{ steps.report.outputs.branch }}" \
+            --title "chore: intake upstream migration ${{ steps.report.outputs.head_short }}" \
+            --body-file "$body_file" \
+            --label migration-candidate \
+            --label needs-human-review

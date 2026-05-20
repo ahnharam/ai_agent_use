@@ -18,8 +18,13 @@
 
 | 구분 | 로컬 경로 | 원격 저장소 | 기본 브랜치 |
 | --- | --- | --- | --- |
-| Fork 프로젝트 | `D:\Github\ai_agent\fork_ai_agent` | `https://github.com/ahnharam/connect-ai.git` | `main` |
-| Haram 프로젝트 | `D:\Github\ai_agent\haram_ai_agent` | `https://github.com/ahnharam/ai_agent_use` | `master` |
+| Fork 프로젝트 | `D:\Github\ai_agent\fork_project` | `https://github.com/ahnharam/connect-ai.git` | `main` |
+| Haram 프로젝트 | `D:\Github\ai_agent\haram_project` | `https://github.com/ahnharam/ai_agent_use` | `master` |
+
+원본 upstream 기준:
+
+- 외부 원본 저장소 URL: `https://github.com/wonseokjung/connect-ai.git`
+- `fork_project` 로컬 remote: `upstream`
 
 중요한 전제:
 
@@ -70,15 +75,15 @@ gh auth status
 로컬 저장소 확인:
 
 ```powershell
-git -C D:\Github\ai_agent\fork_ai_agent status --short --branch
-git -C D:\Github\ai_agent\haram_ai_agent status --short --branch
+git -C D:\Github\ai_agent\fork_project status --short --branch
+git -C D:\Github\ai_agent\haram_project status --short --branch
 ```
 
 `fork_ai_agent`에 원본 저장소 remote가 없다면 추가한다.
 
 ```powershell
-git -C D:\Github\ai_agent\fork_ai_agent remote add upstream https://github.com/<upstream-owner>/<upstream-repo>.git
-git -C D:\Github\ai_agent\fork_ai_agent fetch upstream
+git -C D:\Github\ai_agent\fork_project remote add upstream https://github.com/wonseokjung/connect-ai.git
+git -C D:\Github\ai_agent\fork_project fetch upstream
 ```
 
 ## 5. GitHub Actions 설계
@@ -97,7 +102,7 @@ git -C D:\Github\ai_agent\fork_ai_agent fetch upstream
 권장 파일:
 
 ```text
-fork_ai_agent/.github/workflows/poll-upstream.yml
+fork_project/.github/workflows/poll-upstream.yml
 ```
 
 핵심 동작:
@@ -131,7 +136,7 @@ fork_ai_agent/.github/workflows/poll-upstream.yml
 권장 파일:
 
 ```text
-haram_ai_agent/.github/workflows/migration-intake.yml
+haram_project/.github/workflows/migration-intake.yml
 ```
 
 초기 v0에서는 완전 자동 적용보다 "PR 생성 및 분석 리포트 작성"까지만 자동화하는 것이 안전하다.
@@ -245,7 +250,7 @@ Codex가 자동 마이그레이션할 때 지켜야 할 불변 조건:
 마이그레이션 후 최소 검증:
 
 ```powershell
-cd D:\Github\ai_agent\haram_ai_agent
+cd D:\Github\ai_agent\haram_project
 npm install
 npm run compile
 npm audit
@@ -254,19 +259,19 @@ npm audit
 잔여 legacy 노출 확인:
 
 ```powershell
-rg "connectAiLab|connect-ai|YouTube|Instagram|PayPal|channel|comment queue" D:\Github\ai_agent\haram_ai_agent
+rg "connectAiLab|connect-ai|YouTube|Instagram|PayPal|channel|comment queue" D:\Github\ai_agent\haram_project
 ```
 
 Haram 식별자 확인:
 
 ```powershell
-rg "haram-ai-agent|haramAi|Haram AI Agent|.haram-ai-brain" D:\Github\ai_agent\haram_ai_agent
+rg "haram-ai-agent|haramAi|Haram AI Agent|.haram-ai-brain" D:\Github\ai_agent\haram_project
 ```
 
 에이전트 역할 확인:
 
 ```powershell
-rg "ceo|business|planner|architect|designer|frontend|backend|dba|qa" D:\Github\ai_agent\haram_ai_agent\src
+rg "ceo|business|planner|architect|designer|frontend|backend|dba|qa" D:\Github\ai_agent\haram_project\src
 ```
 
 ## 11. 실패 처리 기준
@@ -349,8 +354,8 @@ rg "ceo|business|planner|architect|designer|frontend|backend|dba|qa" D:\Github\a
 
 | 항목 | 현재 권장값 | 확정 필요 여부 |
 | --- | --- | --- |
-| 외부 원본 저장소 URL | `https://github.com/<upstream-owner>/<upstream-repo>.git` | 필요 |
-| `fork_ai_agent` 기본 브랜치 | `main` | 확인 필요 |
+| 외부 원본 저장소 URL | `https://github.com/wonseokjung/connect-ai.git` | 확정 |
+| `fork_ai_agent` 기본 브랜치 | `main` | 확인 완료 |
 | `haram_ai_agent` 기본 브랜치 | `master` | 현재 기준 확정 |
 | 로컬 자동화 실행 시간 | 매일 09:00 Asia/Seoul | 변경 가능 |
 | 첫 주 운영 모드 | 리포트 전용 | 권장 |
