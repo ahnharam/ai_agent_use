@@ -780,7 +780,7 @@ export class CodexWorkflowController {
                 input: [{ type: 'text', text: prompt }],
                 cwd: run.git.workCwd || run.cwd,
                 approvalPolicy: 'never',
-                sandboxPolicy: sandboxPolicy(sandbox, run.git.workCwd || run.cwd),
+                sandboxPolicy: sandboxPolicy(sandbox, run.git.workCwd || run.cwd, role === 'web-researcher'),
                 settings: { developer_instructions: roleInstructions },
                 ...(this.codexModel ? { model: this.codexModel } : {}),
             });
@@ -824,6 +824,7 @@ export class CodexWorkflowController {
             approvalPolicy: 'never',
             sandbox: sandbox === 'readOnly' ? 'read-only' : 'workspace-write',
             serviceName: 'haram_ai_agent_codex_workflow',
+            ...(role === 'web-researcher' ? { config: webResearchConfig() } : {}),
             ...(this.codexModel ? { model: this.codexModel } : {}),
         };
 
@@ -1033,11 +1034,25 @@ export class CodexWorkflowController {
     }
 }
 
-function sandboxPolicy(kind: SandboxKind, cwd: string): any {
+function sandboxPolicy(kind: SandboxKind, cwd: string, networkAccess = false): any {
     if (kind === 'readOnly') {
-        return { type: 'readOnly', access: { type: 'fullAccess' } };
+        return { type: 'readOnly', networkAccess };
     }
-    return { type: 'workspaceWrite', writableRoots: [cwd], readOnlyAccess: { type: 'fullAccess' }, networkAccess: false };
+    return { type: 'workspaceWrite', writableRoots: [cwd], networkAccess, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+}
+
+function webResearchConfig(): any {
+    return {
+        web_search: 'live',
+        tools: {
+            web_search: {
+                context_size: 'medium',
+                allowed_domains: null,
+                location: null,
+            },
+            view_image: null,
+        },
+    };
 }
 
 function shouldSkipImplementation(prompt: string): boolean {
@@ -1086,6 +1101,19 @@ function assignedRolesForRun(run: WorkflowRun, needsResearch: boolean, implement
     if (implementationRoles.length > 0) roles.push('git-manager', ...implementationRoles, 'qa-agent', 'doc-writer');
     else if (run.runKind === 'readOnly' && run.selectedRuntime === 'sdk') roles.push('sdk-runtime');
     return Array.from(new Set(roles));
+}
+
+export function plannedRolesForRun(run: WorkflowRun): string[] {
+    if (Array.isArray(run.artifacts.assignedRoles) && run.artifacts.assignedRoles.length > 0) {
+        return run.artifacts.assignedRoles;
+    }
+    if (run.runKind === 'gitOperation') return ['git-manager'];
+    if (run.runKind === 'automation') return ['sdk-runtime'];
+    const needsResearch = shouldRunWebResearch(run.userPrompt || run.prompt || '');
+    if (run.runKind === 'readOnly') {
+        return assignedRolesForRun(run, needsResearch, []);
+    }
+    return assignedRolesForRun(run, needsResearch, selectImplementationRoles(run));
 }
 
 function implementationStageId(role: CodexWorkflowRole): string {

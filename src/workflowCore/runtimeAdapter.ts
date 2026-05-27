@@ -308,12 +308,15 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
         const sandboxMode = params.sandbox === 'readOnly' || params.sandboxPolicy?.type === 'readOnly'
             ? 'read-only'
             : 'workspace-write';
+        const networkAccessEnabled = typeof params.sandboxPolicy?.networkAccess === 'boolean'
+            ? params.sandboxPolicy.networkAccess
+            : false;
         return {
             workingDirectory: params.cwd || this.options.cwd,
             approvalPolicy: normalizeApprovalPolicy(params.approvalPolicy),
             sandboxMode,
             skipGitRepoCheck: true,
-            networkAccessEnabled: false,
+            networkAccessEnabled,
             model: params.model,
         };
     }

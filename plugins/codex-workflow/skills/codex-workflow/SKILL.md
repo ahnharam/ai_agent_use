@@ -20,7 +20,7 @@ Runtime policy:
 - Use `runtime: "auto"` unless the user explicitly asks for `sdk` or `app-server`.
 - Use `runKind: "readOnly"` for analysis/explanation/summarization tasks with no file changes.
 - Use `runKind: "automation"` for simple one-shot SDK-suitable tasks.
-- Use `runKind: "multiAgent"` for the full docs/git/coder/QA/doc-writer workflow.
+- Use `runKind: "multiAgent"` for the full docs/web-research/git/designer/frontend/backend/QA/doc-writer workflow.
 - Use `runKind: "contextControl"` when the user asks for compact/resume/fork behavior.
 - Use `runKind: "gitOperation"` when the user asks the Workflow App itself to inspect, commit, or push the current repository state.
 
