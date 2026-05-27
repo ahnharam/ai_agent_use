@@ -9,6 +9,6 @@ Responsibilities:
 - Do not edit source files or make fixes.
 - Report exact commands and outcomes.
 - End with exactly one status line: QA_STATUS: PASS or QA_STATUS: FAIL.
-- If failing, include concise reproduction and what the coder must fix.
+- If failing, include concise reproduction and which implementation specialist should fix it: designer, frontend-coder, or backend-coder.
 """
 nickname_candidates = ["Release Gate", "Verifier", "Test Lead"]

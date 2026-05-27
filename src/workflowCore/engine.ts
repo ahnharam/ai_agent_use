@@ -65,8 +65,11 @@ type SandboxKind = 'readOnly' | 'workspaceWrite';
 
 const ROLE_FILE: Record<CodexWorkflowRole, string> = {
     'docs-agent': 'docs-agent.toml',
+    'web-researcher': 'web-researcher.toml',
     'git-manager': 'git-manager.toml',
-    coder: 'coder.toml',
+    designer: 'designer.toml',
+    'frontend-coder': 'frontend-coder.toml',
+    'backend-coder': 'backend-coder.toml',
     'qa-agent': 'qa-agent.toml',
     'doc-writer': 'doc-writer.toml',
 };
@@ -411,8 +414,17 @@ export class CodexWorkflowController {
             store.saveRun(run);
             await this.processAgentRequests(store, run, 'docs', 'docs-agent', docs);
 
+            const needsResearch = shouldRunWebResearch(run.userPrompt);
+            if (needsResearch) {
+                const research = await this.runStage(store, run, 'web-research', 'web-researcher', 'readOnly', this.webResearchPrompt(run));
+                run.artifacts.webResearchSummary = summarize(research.text, 5000);
+                store.saveRun(run);
+                await this.processAgentRequests(store, run, 'web-research', 'web-researcher', research);
+            }
+
             if (readOnly) {
-                run.artifacts.finalSummary = run.artifacts.docsSummary || docs.text;
+                run.artifacts.assignedRoles = assignedRolesForRun(run, needsResearch, []);
+                run.artifacts.finalSummary = [run.artifacts.docsSummary, run.artifacts.webResearchSummary].filter(Boolean).join('\n\n') || docs.text;
                 run.status = 'completed';
                 store.saveRun(run);
                 this.emitState('Read-only request completed; coding/git stages skipped.');
@@ -425,17 +437,31 @@ export class CodexWorkflowController {
             store.saveRun(run);
             await this.processAgentRequests(store, run, 'git-plan', 'git-manager', gitPlan);
 
-            const coder = await this.runStage(store, run, 'coder', 'coder', 'workspaceWrite', this.coderPrompt(run));
-            run.artifacts.coderSummary = summarize(coder.text);
-            if (coder.diff) run.artifacts.lastDiff = coder.diff.slice(0, 20000);
+            const implementationRoles = selectImplementationRoles(run);
+            run.artifacts.assignedRoles = assignedRolesForRun(run, needsResearch, implementationRoles);
             store.saveRun(run);
-            const coderAnswers = await this.processAgentRequests(store, run, 'coder', 'coder', coder);
-            if (coderAnswers) {
-                const followup = await this.runStage(store, run, 'coder-agent-requests-followup', 'coder', 'workspaceWrite', this.agentRequestFollowupPrompt(run, coderAnswers));
-                run.artifacts.coderSummary = summarize(followup.text);
-                if (followup.diff) run.artifacts.lastDiff = followup.diff.slice(0, 20000);
+
+            const implementationSummaries: string[] = [];
+            for (const role of implementationRoles) {
+                const stageId = implementationStageId(role);
+                const result = await this.runStage(store, run, stageId, role, 'workspaceWrite', this.implementationPrompt(run, role));
+                const summary = summarize(result.text);
+                setImplementationSummary(run, role, summary);
+                implementationSummaries.push(`${role}: ${summary}`);
+                if (result.diff) run.artifacts.lastDiff = result.diff.slice(0, 20000);
                 store.saveRun(run);
+                const answers = await this.processAgentRequests(store, run, stageId, role, result);
+                if (answers) {
+                    const followup = await this.runStage(store, run, `${stageId}-agent-requests-followup`, role, 'workspaceWrite', this.agentRequestFollowupPrompt(run, role, answers));
+                    const followupSummary = summarize(followup.text);
+                    setImplementationSummary(run, role, followupSummary);
+                    implementationSummaries.push(`${role} follow-up: ${followupSummary}`);
+                    if (followup.diff) run.artifacts.lastDiff = followup.diff.slice(0, 20000);
+                    store.saveRun(run);
+                }
             }
+            run.artifacts.coderSummary = summarize(implementationSummaries.join('\n\n'), 6000);
+            store.saveRun(run);
 
             let qa = await this.runStage(store, run, 'qa', 'qa-agent', 'workspaceWrite', this.qaPrompt(run));
             run.artifacts.qaSummary = summarize(qa.text);
@@ -446,8 +472,17 @@ export class CodexWorkflowController {
                 this.assertNotCancelled();
                 run.repairAttempts += 1;
                 store.saveRun(run);
-                const repair = await this.runStage(store, run, `coder-repair-${run.repairAttempts}`, 'coder', 'workspaceWrite', this.repairPrompt(run, qa));
-                run.artifacts.coderSummary = summarize(repair.text);
+                const repairRoles = selectRepairRoles(run, qa, implementationRoles);
+                const repairSummaries: string[] = [];
+                for (const role of repairRoles) {
+                    const repair = await this.runStage(store, run, `${implementationStageId(role)}-repair-${run.repairAttempts}`, role, 'workspaceWrite', this.repairPrompt(run, role, qa));
+                    const repairSummary = summarize(repair.text);
+                    setImplementationSummary(run, role, repairSummary);
+                    repairSummaries.push(`${role}: ${repairSummary}`);
+                    if (repair.diff) run.artifacts.lastDiff = repair.diff.slice(0, 20000);
+                    store.saveRun(run);
+                }
+                run.artifacts.coderSummary = summarize(repairSummaries.join('\n\n') || run.artifacts.coderSummary || '', 6000);
                 qa = await this.runStage(store, run, `qa-retry-${run.repairAttempts}`, 'qa-agent', 'workspaceWrite', this.qaPrompt(run));
                 run.artifacts.qaSummary = summarize(qa.text);
                 run.artifacts.qaEvidence = summarize(`${qa.text || ''}\n${qa.error || ''}`, 4000);
@@ -907,32 +942,36 @@ export class CodexWorkflowController {
         return this.withRole('docs-agent', `User request:\n${run.userPrompt}\n\nRead the repository rules, README, package metadata, and relevant docs. Do not edit files. Return a concise Korean summary of rules, conventions, risks, and the likely implementation path.`);
     }
 
+    private webResearchPrompt(run: WorkflowRun): string {
+        return this.withRole('web-researcher', `User request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nResearch only the external/current information needed for this task. Use available web/search tools if they are available in this Codex environment. Do not edit files. Return concise Korean findings, source links when available, and any uncertainty or missing access.`);
+    }
+
     private gitPlanPrompt(run: WorkflowRun): string {
-        return this.withRole('git-manager', `User request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nGit state:\n${JSON.stringify(run.git, null, 2)}\n\nConfirm the branch/worktree policy and identify commit/push safety gates. Do not run commit or push. Return concise Korean output.`);
+        return this.withRole('git-manager', `User request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nWeb research summary:\n${run.artifacts.webResearchSummary || ''}\n\nGit state:\n${JSON.stringify(run.git, null, 2)}\n\nConfirm the branch/worktree policy and identify commit/push safety gates. Do not run commit or push. Return concise Korean output.`);
     }
 
-    private coderPrompt(run: WorkflowRun): string {
-        return this.withRole('coder', `Implement the user request in this workspace.\n\nUser request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nGit plan:\n${run.artifacts.gitPlan || ''}\n\nDo not commit or push. Keep edits scoped. After implementation, summarize changed files and any commands you ran.`);
+    private implementationPrompt(run: WorkflowRun, role: CodexWorkflowRole): string {
+        return this.withRole(role, `${implementationMission(role)}\n\nUser request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nWeb research summary:\n${run.artifacts.webResearchSummary || ''}\n\nGit plan:\n${run.artifacts.gitPlan || ''}\n\nDo not commit or push. Keep edits scoped to your role. If another specialist should answer a question before you continue, include an AGENT_REQUESTS JSON block like [{"toRole":"docs-agent","question":"..."}]. After your work, summarize changed files, behavior changes, and commands run.`);
     }
 
-    private repairPrompt(run: WorkflowRun, qa: CodexTurnResult): string {
-        return this.withRole('coder', `Repair the implementation based on QA feedback.\n\nUser request:\n${run.userPrompt}\n\nQA feedback:\n${qa.text || qa.error || ''}\n\nDo not commit or push. Keep the fix scoped and summarize changed files.`);
+    private repairPrompt(run: WorkflowRun, role: CodexWorkflowRole, qa: CodexTurnResult): string {
+        return this.withRole(role, `Repair the implementation area owned by ${role} based on QA feedback.\n\nUser request:\n${run.userPrompt}\n\nQA feedback:\n${qa.text || qa.error || ''}\n\nCurrent implementation summaries:\n${implementationSummaryBlock(run)}\n\nDo not commit or push. Keep the fix scoped to your role and summarize changed files.`);
     }
 
     private agentRequestPrompt(run: WorkflowRun, fromRole: CodexWorkflowRole, question: string): string {
         return `Another workflow agent (${fromRole}) requested information for this run.\n\nUser request:\n${run.userPrompt}\n\nQuestion:\n${question}\n\nAnswer concisely in Korean. Do not edit files.`;
     }
 
-    private agentRequestFollowupPrompt(run: WorkflowRun, answers: string): string {
-        return this.withRole('coder', `Continue the implementation using these agent handoff answers.\n\nUser request:\n${run.userPrompt}\n\nAgent answers:\n${answers}\n\nApply any needed scoped changes. Do not commit or push. Summarize changed files.`);
+    private agentRequestFollowupPrompt(run: WorkflowRun, role: CodexWorkflowRole, answers: string): string {
+        return this.withRole(role, `Continue your assigned work using these agent handoff answers.\n\nUser request:\n${run.userPrompt}\n\nAgent answers:\n${answers}\n\nApply any needed scoped changes for ${role}. Do not commit or push. Summarize changed files.`);
     }
 
     private qaPrompt(run: WorkflowRun): string {
-        return this.withRole('qa-agent', `Verify the current implementation for this request:\n${run.userPrompt}\n\nRun the most relevant available checks, starting with npm run compile when present. Do not edit source files. Include command names and exit evidence. End with exactly one line: QA_STATUS: PASS or QA_STATUS: FAIL, followed by concise Korean evidence.`);
+        return this.withRole('qa-agent', `Verify the current implementation for this request:\n${run.userPrompt}\n\nAssigned agents:\n${(run.artifacts.assignedRoles || []).join(', ')}\n\nImplementation summaries:\n${implementationSummaryBlock(run)}\n\nRun the most relevant available checks, starting with npm run compile when present. Do not edit source files. Include command names and exit evidence. End with exactly one line: QA_STATUS: PASS or QA_STATUS: FAIL, followed by concise Korean evidence.`);
     }
 
     private docPrompt(run: WorkflowRun): string {
-        return this.withRole('doc-writer', `Summarize the completed work for handoff.\n\nUser request:\n${run.userPrompt}\n\nCoder summary:\n${run.artifacts.coderSummary || ''}\n\nQA summary:\n${run.artifacts.qaSummary || ''}\n\nReturn Korean release notes with changed behavior, verification, and any remaining risk. Do not edit files.`);
+        return this.withRole('doc-writer', `Summarize the completed work for handoff.\n\nUser request:\n${run.userPrompt}\n\nAssigned agents:\n${(run.artifacts.assignedRoles || []).join(', ')}\n\nWeb research summary:\n${run.artifacts.webResearchSummary || ''}\n\nImplementation summaries:\n${implementationSummaryBlock(run)}\n\nQA summary:\n${run.artifacts.qaSummary || ''}\n\nReturn Korean release notes with changed behavior, verification, and any remaining risk. Do not edit files.`);
     }
 
     private withRole(role: CodexWorkflowRole, body: string): string {
@@ -1014,6 +1053,75 @@ function inferRunKind(prompt: string): WorkflowRunKind {
     if (asksGitOnly && !asksImplementation) return 'gitOperation';
     if (shouldSkipImplementation(prompt)) return 'readOnly';
     return 'multiAgent';
+}
+
+function shouldRunWebResearch(prompt: string): boolean {
+    return /(latest|current|up-to-date|look up|search|browse|official docs|web에서|웹에서|검색|찾아봐|찾아서|조사|최신|공식\s*문서|리서치해|research this)/i.test(prompt);
+}
+
+function selectImplementationRoles(run: WorkflowRun): CodexWorkflowRole[] {
+    const text = `${run.userPrompt}\n${run.artifacts.docsSummary || ''}\n${run.artifacts.gitPlan || ''}`.toLowerCase();
+    const wantsDesigner = /(designer|design|ux|ui|layout|visual|style|css|figma|wireframe|화면|디자인|스타일|레이아웃|프로필|버튼|카드)/i.test(text);
+    const wantsFrontend = wantsDesigner || /(frontend|front-end|front end|webview|html|css|client|react|vue|svelte|browser|electron|sidebar|프론트|웹뷰|브라우저|화면)/i.test(text);
+    const wantsBackend = /(backend|back-end|server|api|store|engine|workflow|agent|mcp|sdk|git|database|db|auth|queue|approval|runtime|orchestrat|백엔드|서버|에이전트|워크플로|승인|깃|저장|상태)/i.test(text);
+    const roles: CodexWorkflowRole[] = [];
+    if (wantsDesigner) roles.push('designer');
+    if (wantsFrontend) roles.push('frontend-coder');
+    if (wantsBackend || roles.length === 0) roles.push('backend-coder');
+    return roles;
+}
+
+function selectRepairRoles(run: WorkflowRun, qa: CodexTurnResult, fallback: CodexWorkflowRole[]): CodexWorkflowRole[] {
+    const text = `${qa.text || ''}\n${qa.error || ''}`.toLowerCase();
+    const roles: CodexWorkflowRole[] = [];
+    if (/(designer|design|ux|ui|layout|visual|style|css|화면|디자인|스타일|레이아웃)/i.test(text) && fallback.includes('designer')) roles.push('designer');
+    if (/(frontend|front-end|html|css|client|react|webview|browser|프론트|웹뷰|브라우저|화면)/i.test(text) && fallback.includes('frontend-coder')) roles.push('frontend-coder');
+    if (/(backend|server|api|store|engine|workflow|agent|mcp|sdk|git|database|db|auth|queue|approval|runtime|백엔드|서버|에이전트|워크플로|승인|깃)/i.test(text) && fallback.includes('backend-coder')) roles.push('backend-coder');
+    return roles.length ? Array.from(new Set(roles)) : fallback;
+}
+
+function assignedRolesForRun(run: WorkflowRun, needsResearch: boolean, implementationRoles: CodexWorkflowRole[]): string[] {
+    const roles = ['docs-agent'];
+    if (needsResearch) roles.push('web-researcher');
+    if (implementationRoles.length > 0) roles.push('git-manager', ...implementationRoles, 'qa-agent', 'doc-writer');
+    else if (run.runKind === 'readOnly' && run.selectedRuntime === 'sdk') roles.push('sdk-runtime');
+    return Array.from(new Set(roles));
+}
+
+function implementationStageId(role: CodexWorkflowRole): string {
+    if (role === 'designer') return 'design';
+    if (role === 'frontend-coder') return 'frontend-code';
+    if (role === 'backend-coder') return 'backend-code';
+    return role;
+}
+
+function implementationMission(role: CodexWorkflowRole): string {
+    if (role === 'designer') {
+        return 'You are responsible for product/UI/UX design implementation. Improve layout, hierarchy, interaction states, visual polish, and user-facing copy where the task requires it.';
+    }
+    if (role === 'frontend-coder') {
+        return 'You are responsible for frontend implementation. Work on UI, webview, browser-facing code, client state, styling, accessibility, and visible behavior.';
+    }
+    if (role === 'backend-coder') {
+        return 'You are responsible for backend/core implementation. Work on workflow orchestration, state, API, runtime adapters, git policies, persistence, and non-UI logic.';
+    }
+    return `You are responsible for the ${role} part of this workflow.`;
+}
+
+function setImplementationSummary(run: WorkflowRun, role: CodexWorkflowRole, summary: string): void {
+    if (role === 'designer') run.artifacts.designerSummary = summary;
+    else if (role === 'frontend-coder') run.artifacts.frontendSummary = summary;
+    else if (role === 'backend-coder') run.artifacts.backendSummary = summary;
+    else run.artifacts.coderSummary = summary;
+}
+
+function implementationSummaryBlock(run: WorkflowRun): string {
+    return [
+        run.artifacts.designerSummary ? `designer:\n${run.artifacts.designerSummary}` : '',
+        run.artifacts.frontendSummary ? `frontend-coder:\n${run.artifacts.frontendSummary}` : '',
+        run.artifacts.backendSummary ? `backend-coder:\n${run.artifacts.backendSummary}` : '',
+        run.artifacts.coderSummary ? `combined:\n${run.artifacts.coderSummary}` : '',
+    ].filter(Boolean).join('\n\n') || '(no implementation summary yet)';
 }
 
 function qaPassed(result: CodexTurnResult): boolean {

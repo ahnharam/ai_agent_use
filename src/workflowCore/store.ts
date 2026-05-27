@@ -52,13 +52,18 @@ export interface WorkflowGitState {
 
 export interface WorkflowArtifacts {
     docsSummary?: string;
+    webResearchSummary?: string;
     gitPlan?: string;
     coderSummary?: string;
+    designerSummary?: string;
+    frontendSummary?: string;
+    backendSummary?: string;
     qaSummary?: string;
     qaEvidence?: string;
     docSummary?: string;
     finalSummary?: string;
     lastDiff?: string;
+    assignedRoles?: string[];
 }
 
 export interface ApprovalRequest {
@@ -125,8 +130,11 @@ export interface WorkflowRun {
 
 export const CODEX_WORKFLOW_ROLES = [
     'docs-agent',
+    'web-researcher',
     'git-manager',
-    'coder',
+    'designer',
+    'frontend-coder',
+    'backend-coder',
     'qa-agent',
     'doc-writer',
 ] as const;

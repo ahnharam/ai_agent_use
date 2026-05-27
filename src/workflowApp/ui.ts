@@ -46,8 +46,11 @@ const TOKEN=${JSON.stringify(authToken)};
 let runs=[], selected=null;
 const AGENT_PROFILES=[
   {role:'docs-agent',initial:'D',title:'문서/규칙 분석',summary:'README, 규칙 문서, 컨벤션, 기존 설계 맥락을 읽고 작업 기준을 요약합니다.'},
+  {role:'web-researcher',initial:'R',title:'웹 리서치',summary:'최신 정보, 공식 문서, 외부 근거가 필요한 작업에서 웹/검색 기반 조사 결과를 제공합니다.'},
   {role:'git-manager',initial:'G',title:'Git 작업 관리',summary:'브랜치, worktree, 변경 파일, commit, push 승인 흐름과 충돌 상태를 관리합니다.'},
-  {role:'coder',initial:'C',title:'코드 수정',summary:'요청 범위 안에서 소스 코드를 수정합니다. commit과 push는 수행하지 않습니다.'},
+  {role:'designer',initial:'U',title:'디자인/UX',summary:'화면 구조, 시각 계층, 상호작용 상태, 사용자 문구와 디자인 완성도를 담당합니다.'},
+  {role:'frontend-coder',initial:'F',title:'프론트엔드 구현',summary:'UI, webview, 클라이언트 상태, CSS, 접근성, 브라우저 동작을 구현합니다.'},
+  {role:'backend-coder',initial:'B',title:'백엔드/코어 구현',summary:'워크플로우 엔진, API, 저장소, 런타임, 승인, 큐, Git 정책 같은 코어 로직을 구현합니다.'},
   {role:'qa-agent',initial:'Q',title:'검증/QA',summary:'빌드, 테스트, 동작 확인을 수행하고 실패하면 수정 루프로 되돌립니다.'},
   {role:'doc-writer',initial:'W',title:'작업 요약',summary:'완료된 변경, 검증 결과, 남은 위험을 릴리스 노트 형태로 정리합니다.'},
   {role:'sdk-runtime',initial:'S',title:'SDK 자동 실행',summary:'단순 read-only 분석이나 자동화 run을 빠르게 처리하는 경량 실행 경로입니다.'}
@@ -62,13 +65,28 @@ async function api(path, opts){
 function badge(s){return '<span class="status '+String(s||'')+'">'+(s||'unknown')+'</span>'}
 function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function runtimeLabel(r){return (r.selectedRuntime||r.runtime||'auto')+' / '+(r.runKind||'multiAgent')}
+function promptText(r){return String((r&&r.prompt)||((r&&r.userPrompt)||''))}
+function needsResearch(r){return /(latest|current|up-to-date|look up|search|browse|official docs|web에서|웹에서|검색|찾아봐|찾아서|조사|최신|공식\\s*문서|리서치해|research this)/i.test(promptText(r))}
+function implementationRolesForRun(r){
+  const text=(promptText(r)+'\\n'+JSON.stringify((r&&r.artifacts)||{})).toLowerCase();
+  const wantsDesigner=/(designer|design|ux|ui|layout|visual|style|css|figma|wireframe|화면|디자인|스타일|레이아웃|프로필|버튼|카드)/i.test(text);
+  const wantsFrontend=wantsDesigner||/(frontend|front-end|front end|webview|html|css|client|react|vue|svelte|browser|electron|sidebar|프론트|웹뷰|브라우저|화면)/i.test(text);
+  const wantsBackend=/(backend|back-end|server|api|store|engine|workflow|agent|mcp|sdk|git|database|db|auth|queue|approval|runtime|orchestrat|백엔드|서버|에이전트|워크플로|승인|깃|저장|상태)/i.test(text);
+  const roles=[];
+  if(wantsDesigner) roles.push('designer');
+  if(wantsFrontend) roles.push('frontend-coder');
+  if(wantsBackend||roles.length===0) roles.push('backend-coder');
+  return roles;
+}
 function rolesForRun(r){
   const kind=r.runKind||'multiAgent';
+  const assigned=(r.artifacts&&Array.isArray(r.artifacts.assignedRoles))?r.artifacts.assignedRoles:[];
+  if(assigned.length) return assigned;
   if(kind==='gitOperation') return ['git-manager'];
-  if(kind==='readOnly') return (r.selectedRuntime==='sdk'||r.runtime==='sdk')?['sdk-runtime']:['docs-agent'];
+  if(kind==='readOnly') return (r.selectedRuntime==='sdk'||r.runtime==='sdk')?['sdk-runtime']:(needsResearch(r)?['docs-agent','web-researcher']:['docs-agent']);
   if(kind==='automation') return ['sdk-runtime'];
   const stageRoles=(r.stages||[]).map(s=>s.role).filter(Boolean);
-  const base=['docs-agent','git-manager','coder','qa-agent','doc-writer'];
+  const base=['docs-agent'].concat(needsResearch(r)?['web-researcher']:[],['git-manager'],implementationRolesForRun(r),['qa-agent','doc-writer']);
   return Array.from(new Set([...stageRoles,...base])).filter(role=>role!=='sdk');
 }
 function runActionButtons(r){
@@ -90,9 +108,9 @@ function renderHome(){
     '<div class="card"><h2>Agent Profiles</h2>'+renderProfiles([])+'</div>'
     +'<div class="card"><h2>Active Workflow Agents</h2>'+(activeRuns.length?'<div class="timeline">'+activeRuns.map(r=>'<div class="stage"><b>'+esc((r.prompt||r.userPrompt||'').slice(0,48))+'</b>'+badge(r.status)+'<span class="agent-tags">'+rolesForRun(r).map(role=>'<span class="agent-tag">'+esc(role)+'</span>').join('')+'</span></div>').join('')+'</div>':'<div class="muted">현재 실행 또는 승인 대기 중인 작업이 없습니다.</div>')+'</div>'
     +'<div class="card"><h2>Run Kind Agent Map</h2><div class="timeline">'
-    +'<div class="stage"><b>multiAgent</b><span></span><span>docs-agent, git-manager, coder, qa-agent, doc-writer</span></div>'
+    +'<div class="stage"><b>multiAgent</b><span></span><span>docs-agent, web-researcher(필요 시), git-manager, designer/frontend-coder/backend-coder, qa-agent, doc-writer</span></div>'
     +'<div class="stage"><b>gitOperation</b><span></span><span>git-manager</span></div>'
-    +'<div class="stage"><b>readOnly</b><span></span><span>docs-agent 또는 sdk-runtime</span></div>'
+    +'<div class="stage"><b>readOnly</b><span></span><span>docs-agent, web-researcher(필요 시) 또는 sdk-runtime</span></div>'
     +'<div class="stage"><b>automation</b><span></span><span>sdk-runtime</span></div>'
     +'</div></div>';
 }
