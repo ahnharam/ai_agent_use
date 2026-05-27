@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import {
     CodexTurnResult,
     probeCodexExecutable,
@@ -203,8 +203,14 @@ export class CodexWorkflowController {
         const store = new CodexWorkflowStore(run.cwd);
         try {
             const approval = pendingApproval(run, 'commit');
+            const conflicts = gitConflictFiles(run.git.workCwd);
+            if (conflicts.length > 0) {
+                this.blockApproval(store, run, 'commit', `Commit blocked because unresolved conflict files exist:\n${conflicts.join('\n')}`);
+                return;
+            }
             if (approval?.validationHash && approval.validationHash !== gitDiffHash(run.git.workCwd)) {
-                throw new Error('Git diff changed after commit approval was requested. Refresh the run and review the latest diff.');
+                this.blockApproval(store, run, 'commit', 'Git diff changed after commit approval was requested. Start or refresh the gitOperation run and review the latest diff.');
+                return;
             }
             const files = gitLines(['status', '--short'], run.git.workCwd);
             if (files.length === 0) {
@@ -219,6 +225,9 @@ export class CodexWorkflowController {
             const msg = `codex workflow: ${slugify(run.userPrompt)}`;
             git(['commit', '-m', msg], run.git.workCwd, 60000);
             run.git.commitHash = git(['rev-parse', '--short', 'HEAD'], run.git.workCwd).trim();
+            run.git.changedFiles = gitLines(['status', '--short'], run.git.workCwd);
+            run.git.dirty = run.git.changedFiles.length > 0;
+            run.git.conflictFiles = [];
             run.approvals.commitApproved = true;
             resolveApproval(run, 'commit', 'approved');
             run.approvals.pushRequired = hasRemote(run.git.workCwd);
@@ -253,23 +262,67 @@ export class CodexWorkflowController {
         try {
             const approval = pendingApproval(run, 'push');
             if (approval?.validationHash && approval.validationHash !== run.git.commitHash) {
-                throw new Error('Commit hash changed after push approval was requested. Refresh the run and review the latest commit.');
+                this.blockApproval(store, run, 'push', 'Commit hash changed after push approval was requested. Start or refresh the gitOperation run and review the latest commit.');
+                return;
             }
             const branch = run.git.branch || git(['rev-parse', '--abbrev-ref', 'HEAD'], run.git.workCwd).trim();
-            git(['push', '-u', 'origin', branch], run.git.workCwd, 120000);
-            run.approvals.pushApproved = true;
             resolveApproval(run, 'push', 'approved');
             run.git.pushRemote = 'origin';
             run.git.pushBranch = branch;
-            run.status = 'completed';
+            run.status = 'running';
             store.saveRun(run);
-            this.emitState(`Pushed origin/${branch}.`);
+            this.emitState(`Push started for origin/${branch}.`);
+            void this.executeApprovedPush(store, run, branch);
         } catch (e: any) {
             run.status = 'failed';
             run.git.lastError = e?.message || String(e);
             store.saveRun(run);
             this.emitState(`Push failed: ${run.git.lastError}`);
             throw e;
+        }
+    }
+
+    private blockApproval(store: CodexWorkflowStore, run: WorkflowRun, type: ApprovalRequest['type'], reason: string): void {
+        const approval = pendingApproval(run, type);
+        if (approval) {
+            approval.status = 'blocked';
+            approval.resolutionReason = reason;
+            approval.resolvedAt = new Date().toISOString();
+        }
+        run.status = 'blocked';
+        run.git.lastError = reason;
+        run.artifacts.finalSummary = reason;
+        store.appendEvent(run, `approval.${type}.blocked`, { reason });
+        store.saveRun(run);
+        this.emitState(reason);
+    }
+
+    private async executeApprovedPush(store: CodexWorkflowStore, run: WorkflowRun, branch: string): Promise<void> {
+        try {
+            store.appendEvent(run, 'git.push.started', { branch, remote: 'origin' });
+            await gitAsync(['push', '-u', 'origin', branch], run.git.workCwd, 10 * 60 * 1000, message => {
+                const trimmed = message.trim();
+                if (trimmed) this.emitLog(`[git push] ${trimmed}`);
+            });
+            run.approvals.pushApproved = true;
+            run.git.commitHash = git(['rev-parse', '--short', 'HEAD'], run.git.workCwd).trim();
+            run.git.pushRemote = 'origin';
+            run.git.pushBranch = branch;
+            run.status = 'completed';
+            run.artifacts.finalSummary = `Pushed origin/${branch} at ${run.git.commitHash}.`;
+            store.appendEvent(run, 'git.push.completed', { branch, commitHash: run.git.commitHash });
+            store.saveRun(run);
+            this.emitState(`Pushed origin/${branch}.`);
+        } catch (e: any) {
+            const message = e?.message || String(e);
+            run.status = 'failed';
+            run.git.lastError = /non-fast-forward|fetch first|rejected/i.test(message)
+                ? `Push rejected because the remote branch changed or is ahead. Fetch/rebase or merge, then start a new gitOperation run.\n${message}`
+                : message;
+            run.artifacts.finalSummary = run.git.lastError;
+            store.appendEvent(run, 'git.push.failed', { branch, error: run.git.lastError });
+            store.saveRun(run);
+            this.emitState(`Push failed: ${run.git.lastError}`);
         }
     }
 
@@ -484,6 +537,7 @@ export class CodexWorkflowController {
         const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], root).trim();
         if (!branch || branch === 'HEAD') throw new Error('Git operation blocked: detached HEAD is not supported.');
         const changedFiles = gitLines(['status', '--short'], root);
+        const conflictFiles = gitConflictFiles(root);
         const remote = gitSafe(['remote', 'get-url', 'origin'], root)?.trim();
         const tracking = gitSafe(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], root)?.trim()
             || (gitSafe(['rev-parse', '--verify', `origin/${branch}`], root) ? `origin/${branch}` : '');
@@ -497,6 +551,7 @@ export class CodexWorkflowController {
         run.git.branch = branch;
         run.git.dirty = changedFiles.length > 0;
         run.git.changedFiles = changedFiles;
+        run.git.conflictFiles = conflictFiles;
         run.git.commitHash = head;
         run.git.pushRemote = remote ? 'origin' : undefined;
         run.git.pushBranch = branch;
@@ -507,7 +562,8 @@ export class CodexWorkflowController {
             `HEAD: ${head}`,
             tracking ? `Tracking: ${tracking} (ahead ${counts.ahead}, behind ${counts.behind})` : 'Tracking: none',
             `Changed files: ${changedFiles.length}`,
-        ].join('\n');
+            conflictFiles.length > 0 ? `Conflict files: ${conflictFiles.length}` : '',
+        ].filter(Boolean).join('\n');
         store.upsertStage(run, {
             id: 'git-inspect',
             role: 'git-manager',
@@ -523,7 +579,18 @@ export class CodexWorkflowController {
             ahead: counts.ahead,
             behind: counts.behind,
             changedFiles: changedFiles.length,
+            conflictFiles: conflictFiles.length,
         });
+
+        if (conflictFiles.length > 0) {
+            run.status = 'blocked';
+            run.git.lastError = `Git operation blocked because unresolved conflict files exist:\n${conflictFiles.join('\n')}`;
+            run.artifacts.gitPlan = summary;
+            run.artifacts.finalSummary = run.git.lastError;
+            store.saveRun(run);
+            this.emitState(run.git.lastError);
+            return;
+        }
 
         if (changedFiles.length > 0) {
             const diffHash = gitDiffHash(root);
@@ -983,6 +1050,52 @@ function git(args: string[], cwd: string, timeout = 30000): string {
     return res.stdout || '';
 }
 
+function gitAsync(
+    args: string[],
+    cwd: string,
+    timeout = 30000,
+    onOutput?: (message: string) => void,
+): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const child = spawn('git', args, {
+            cwd,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        });
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try { child.kill(); } catch { /* ignore */ }
+            reject(new Error(`git ${args.join(' ')} timed out after ${Math.round(timeout / 1000)}s.`));
+        }, timeout);
+        const handleOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+            const text = chunk.toString();
+            if (stream === 'stdout') stdout += text;
+            else stderr += text;
+            for (const line of text.split(/\r?\n/).filter(Boolean)) onOutput?.(line);
+        };
+        child.stdout.on('data', chunk => handleOutput('stdout', chunk));
+        child.stderr.on('data', chunk => handleOutput('stderr', chunk));
+        child.once('error', error => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
+        });
+        child.once('exit', code => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (code === 0) resolve(stdout);
+            else reject(new Error(`git ${args.join(' ')} failed: ${(stderr || stdout).trim() || `exit ${code}`}`));
+        });
+    });
+}
+
 function gitSafe(args: string[], cwd: string, timeout = 30000): string | null {
     try { return git(args, cwd, timeout); }
     catch { return null; }
@@ -991,6 +1104,22 @@ function gitSafe(args: string[], cwd: string, timeout = 30000): string | null {
 function gitLines(args: string[], cwd: string): string[] {
     const out = gitSafe(args, cwd) || '';
     return out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+}
+
+function gitConflictFiles(cwd: string): string[] {
+    const statusFiles = gitLines(['status', '--porcelain', '-uall'], cwd)
+        .filter(line => {
+            const code = line.slice(0, 2);
+            return code.includes('U') || code === 'AA' || code === 'DD';
+        })
+        .map(line => line.slice(3).split(' -> ').pop() || line.slice(3));
+    const indexFiles = gitLines(['ls-files', '-u'], cwd)
+        .map(line => {
+            const tab = line.lastIndexOf('\t');
+            return tab >= 0 ? line.slice(tab + 1) : '';
+        })
+        .filter(Boolean);
+    return Array.from(new Set([...statusFiles, ...indexFiles])).sort();
 }
 
 function hasRemote(cwd: string): boolean {

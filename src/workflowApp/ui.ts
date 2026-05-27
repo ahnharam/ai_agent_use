@@ -77,14 +77,15 @@ async function loadRun(id){
   renderDetail(selected);
 }
 function renderDetail(r){
-  const pending=(r.approvalRequests||[]).filter(a=>a.status==='pending');
+  const approvals=r.approvalRequests||[];
+  const pending=approvals.filter(a=>a.status==='pending');
   const agents=Object.values(r.agents||{});
   const requests=r.agentRequests||[];
   document.getElementById('detail').innerHTML=
   '<div class="grid"><div class="card"><h2>Run</h2><div>'+badge(r.status)+' <span class="status">'+esc(runtimeLabel(r))+'</span></div><div class="muted">'+esc(r.id)+'</div><p>'+esc(r.prompt||r.userPrompt)+'</p><div class="muted">source '+esc(r.source||'')+' · mcp '+esc(r.mcpSource||'')+'</div><div class="row"><button class="secondary" onclick="resumeRun()">Resume</button><button class="danger" onclick="cancelRun()">Cancel</button></div></div>'
   +'<div class="card"><h2>Git</h2><pre>'+esc(JSON.stringify(r.git||{},null,2))+'</pre></div></div>'
   +'<div class="card"><h2>Worktree</h2><div class="row"><button class="secondary" onclick="mergeBack()">Merge Back</button><button class="secondary" onclick="cleanupWorktree()">Cleanup Worktree</button></div></div>'
-  +'<div class="card"><h2>Approvals</h2>'+(pending.map(a=>'<div class="approval"><b>'+esc(a.type)+'</b><p>'+esc(a.summary)+'</p><div class="muted">hash '+esc(a.validationHash||'')+'</div><pre>'+esc(a.diff||'')+'</pre><div class="row"><button onclick="approve(\\''+a.id+'\\')">Approve</button><button class="danger" onclick="reject(\\''+a.id+'\\')">Reject</button></div></div>').join('')||'<div class="muted">No pending approvals</div>')+'</div>'
+  +'<div class="card"><h2>Approvals</h2>'+(pending.map(a=>'<div class="approval"><b>'+esc(a.type)+'</b> '+badge(a.status)+'<p>'+esc(a.summary)+'</p><div class="muted">hash '+esc(a.validationHash||'')+'</div><pre>'+esc(a.diff||'')+'</pre><div class="row"><button onclick="approve(\\''+a.id+'\\')">Approve</button><button class="danger" onclick="reject(\\''+a.id+'\\')">Reject</button></div></div>').join('')||'<div class="muted">No pending approvals</div>')+(approvals.length?'<h2>Approval History</h2><div class="timeline">'+approvals.map(a=>'<div class="stage"><b>'+esc(a.type)+'</b>'+badge(a.status)+'<span>'+esc(a.summary)+'\\n'+esc(a.resolutionReason||'')+'</span></div>').join('')+'</div>':'')+'</div>'
   +'<div class="grid">'+agents.map(a=>'<div class="card"><h2>'+esc(a.role)+'</h2><div>'+badge(a.status)+'</div><div class="muted">'+esc(a.threadId||'no thread')+'</div><pre>'+esc(a.lastSummary||a.lastError||'')+'</pre><div class="row"><button class="secondary" onclick="compactAgent(\\''+a.role+'\\')">Compact</button><button class="secondary" onclick="resetAgent(\\''+a.role+'\\')">Reset</button></div></div>').join('')+'</div>'
   +'<div class="card"><h2>Agent Requests</h2><div class="timeline">'+(requests.map(q=>'<div class="stage"><b>'+esc(q.fromRole+' -> '+q.toRole)+'</b>'+badge(q.status)+'<span>'+esc(q.question)+'\\n'+esc(q.answerSummary||'')+'</span></div>').join('')||'<div class="muted">No agent requests</div>')+'</div></div>'
   +'<div class="card"><h2>Timeline</h2><div class="timeline">'+(r.stages||[]).map(s=>'<div class="stage"><b>'+esc(s.id)+'</b>'+badge(s.status)+'<span>'+esc(s.outputSummary||s.error||s.inputSummary||'')+'</span></div>').join('')+'</div></div>'

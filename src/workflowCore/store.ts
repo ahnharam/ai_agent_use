@@ -8,7 +8,7 @@ export type WorkflowRunKind = 'automation' | 'readOnly' | 'approvalRequired' | '
 export type WorkflowStatus = 'idle' | 'queued' | 'running' | 'blocked' | 'pendingCommitApproval' | 'pendingPushApproval' | 'completed' | 'failed' | 'cancelled';
 export type StageStatus = 'pending' | 'running' | 'skipped' | 'completed' | 'failed';
 export type AgentStatus = 'idle' | 'running' | 'blocked' | 'completed' | 'failed' | 'reset';
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'blocked';
 export type ApprovalType = 'commit' | 'push' | 'worktree' | 'merge-back' | 'destructive' | 'external';
 export type AgentRequestStatus = 'pending' | 'answered' | 'failed';
 
@@ -41,6 +41,7 @@ export interface WorkflowGitState {
     worktreePath?: string;
     dirty?: boolean;
     changedFiles?: string[];
+    conflictFiles?: string[];
     commitHash?: string;
     pushRemote?: string;
     pushBranch?: string;
