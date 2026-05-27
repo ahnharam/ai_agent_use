@@ -5,6 +5,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawn, spawnSync } from 'child_process';
+import { CodexWorkflowController } from './codexWorkflow';
+import type { CodexContextMode } from './codexWorkflowStore';
 
 // ============================================================
 // Security helpers
@@ -7701,6 +7703,7 @@ async function _safeGitAutoSyncCompany(commitMsg: string, provider: any = null) 
 // event broadcasts.
 let _activeChatProvider: SidebarChatProvider | null = null;
 let _extCtx: vscode.ExtensionContext | null = null;
+let _codexWorkflowController: CodexWorkflowController | null = null;
 
 // One-time recovery for users upgrading from <=2.22.5, where the first-run
 // auto-detect wrote the engine URL to a typo'd config key (`ollamaBase`) that
@@ -7861,6 +7864,11 @@ export function activate(context: vscode.ExtensionContext) {
     _autoPickInstalledModelIfMissing();
     const provider = new SidebarChatProvider(context.extensionUri, context);
     _activeChatProvider = provider;
+    _codexWorkflowController = new CodexWorkflowController({
+        extensionPath: context.extensionUri.fsPath,
+        onUpdate: (event) => provider.postCodexWorkflowEvent(event),
+    });
+    provider.setCodexWorkflowController(_codexWorkflowController);
     // Autonomous-company runtime: idle auto-cycle.
     // 모닝 브리핑은 더 이상 활성화 시점에 자동 발사하지 않습니다 — 일부
     // 사용자(자원이 빠듯한 PC + 처음 확장을 켠 직후 Ollama 차가운 상태)에서
@@ -8865,6 +8873,40 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             } catch (e: any) {
                 vscode.window.showErrorMessage(`프로젝트 생성 실패: ${e?.message || e}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('haramAi.codexWorkflow.open', () => {
+            provider.openCodexWorkflowPanel();
+        }),
+        vscode.commands.registerCommand('haramAi.codexWorkflow.start', async () => {
+            const prompt = await vscode.window.showInputBox({
+                title: 'Start Codex Workflow',
+                prompt: 'Codex subagents will plan, code, QA, summarize, and wait for git approvals.',
+                placeHolder: 'Describe the work to run through Codex Workflow',
+                ignoreFocusOut: true,
+            });
+            if (!prompt?.trim()) return;
+            provider.openCodexWorkflowPanel();
+            _codexWorkflowController?.start(prompt).catch((e: any) => {
+                vscode.window.showErrorMessage(`Codex Workflow start failed: ${e?.message || e}`);
+                provider.postCodexWorkflowEvent({ type: 'state', message: e?.message || String(e) });
+            });
+        }),
+        vscode.commands.registerCommand('haramAi.codexWorkflow.resume', async () => {
+            provider.openCodexWorkflowPanel();
+            _codexWorkflowController?.resumeLatest('resume').catch((e: any) => {
+                vscode.window.showErrorMessage(`Codex Workflow resume failed: ${e?.message || e}`);
+                provider.postCodexWorkflowEvent({ type: 'state', message: e?.message || String(e) });
+            });
+        }),
+        vscode.commands.registerCommand('haramAi.codexWorkflow.cancel', async () => {
+            try {
+                await _codexWorkflowController?.cancel();
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Codex Workflow cancel failed: ${e?.message || e}`);
             }
         })
     );
@@ -15722,6 +15764,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
     private _lastUserActivityTs: number = Date.now();
     private _autoCycleTimer?: NodeJS.Timeout;
     private _autoCycleRunning: boolean = false;
+    private _codexWorkflow?: CodexWorkflowController;
 
     // 🎬 Thinking Mode — live cinematic graph that visualises AI reasoning
     private _thinkingMode: boolean = false;
@@ -15743,6 +15786,23 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
     }
     public unregisterCorporateBroadcastTarget(webview: vscode.Webview) {
         this._corporateBroadcastTargets.delete(webview);
+    }
+    public setCodexWorkflowController(controller: CodexWorkflowController) {
+        this._codexWorkflow = controller;
+    }
+    public postCodexWorkflowEvent(event?: any) {
+        try {
+            this._view?.webview.postMessage({
+                type: 'codexWorkflowState',
+                state: this._codexWorkflow?.getState?.() || null,
+                event: event || null,
+            });
+        } catch { /* ignore */ }
+    }
+    public openCodexWorkflowPanel() {
+        try { this._view?.show?.(true); } catch { /* ignore */ }
+        try { this._view?.webview.postMessage({ type: 'codexWorkflowOpen' }); } catch { /* ignore */ }
+        this.postCodexWorkflowEvent();
     }
     /* Public pulse — module-level helpers (createApproval, YouTube tool
        runs) call this to light up an agent's desk in the office view.
@@ -17169,6 +17229,59 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 case 'promptWithFile':
                     await this._handlePromptWithFile(msg.value, msg.model, msg.files, msg.internet);
                     break;
+                case 'codexWorkflowGetState':
+                    this.postCodexWorkflowEvent();
+                    break;
+                case 'codexWorkflowStart': {
+                    const prompt = String(msg.prompt || '').trim();
+                    if (!prompt) {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: 'Prompt is empty.' });
+                        break;
+                    }
+                    const mode = (msg.contextMode || undefined) as CodexContextMode | undefined;
+                    this._codexWorkflow?.start(prompt, mode).catch((e: any) => {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Codex Workflow start failed: ${e?.message || e}` });
+                        this.postCodexWorkflowEvent({ type: 'state', message: e?.message || String(e) });
+                    });
+                    this.postCodexWorkflowEvent({ type: 'state', message: 'Codex Workflow start requested.' });
+                    break;
+                }
+                case 'codexWorkflowResume': {
+                    const mode = (msg.contextMode || 'resume') as CodexContextMode;
+                    this._codexWorkflow?.resumeLatest(mode).catch((e: any) => {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Codex Workflow resume failed: ${e?.message || e}` });
+                        this.postCodexWorkflowEvent({ type: 'state', message: e?.message || String(e) });
+                    });
+                    this.postCodexWorkflowEvent({ type: 'state', message: 'Codex Workflow resume requested.' });
+                    break;
+                }
+                case 'codexWorkflowCancel':
+                    this._codexWorkflow?.cancel().catch((e: any) => {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Codex Workflow cancel failed: ${e?.message || e}` });
+                    });
+                    break;
+                case 'codexWorkflowCompactAgent':
+                    this._codexWorkflow?.compactAgent(String(msg.role || '')).catch((e: any) => {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Compact failed: ${e?.message || e}` });
+                    });
+                    break;
+                case 'codexWorkflowResetAgent':
+                    try {
+                        this._codexWorkflow?.resetAgent(String(msg.role || ''));
+                    } catch (e: any) {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Reset failed: ${e?.message || e}` });
+                    }
+                    break;
+                case 'codexWorkflowApproveCommit':
+                    this._codexWorkflow?.approveCommit().catch((e: any) => {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Commit failed: ${e?.message || e}` });
+                    });
+                    break;
+                case 'codexWorkflowApprovePush':
+                    this._codexWorkflow?.approvePush().catch((e: any) => {
+                        webviewView.webview.postMessage({ type: 'codexWorkflowToast', value: `Push failed: ${e?.message || e}` });
+                    });
+                    break;
                 case 'probeIDEModels': {
                     /* Try to discover models the host IDE (Antigravity, Cursor,
                      * VS Code w/ Copilot, etc.) exposes via the vscode.lm API.
@@ -17591,6 +17704,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                     // 응답 없이 차단됐음. ready 시점에 한 번 더 동기화.
                     this._restoreDisplayMessages();
                     this._sendCompanyState();
+                    this.postCodexWorkflowEvent();
                     break;
                 case 'openSettings':
                     await this._handleSettingsMenu();
@@ -17687,6 +17801,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
            이제 mount 직후 push + ready 시 push 둘 다 → 메시지 큐가 둘 중 하나만
            살아도 정상 동기화됨. */
         try { this._sendCompanyState(); } catch { /* ignore — _sendCompanyState 내부 가드 있음 */ }
+        this.postCodexWorkflowEvent();
 
         // Sidebar just mounted — drain any prompts that were buffered while it
         // was closed (e.g. EZER injected knowledge before the user opened it).
@@ -17698,6 +17813,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
             webviewView.onDidChangeVisibility(() => {
                 if (webviewView.visible) {
                     try { this._sendCompanyState(); } catch { /* ignore */ }
+                    this.postCodexWorkflowEvent();
                 }
             });
         } catch { /* ignore — onDidChangeVisibility 부재 시 무시 */ }

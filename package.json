@@ -85,6 +85,30 @@
         "icon": "$(verified)"
       },
       {
+        "command": "haramAi.codexWorkflow.open",
+        "title": "Haram AI Agent: Open Codex Workflow",
+        "category": "Haram AI Agent",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "haramAi.codexWorkflow.start",
+        "title": "Haram AI Agent: Start Codex Workflow",
+        "category": "Haram AI Agent",
+        "icon": "$(run)"
+      },
+      {
+        "command": "haramAi.codexWorkflow.resume",
+        "title": "Haram AI Agent: Resume Codex Workflow",
+        "category": "Haram AI Agent",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "haramAi.codexWorkflow.cancel",
+        "title": "Haram AI Agent: Cancel Codex Workflow",
+        "category": "Haram AI Agent",
+        "icon": "$(debug-stop)"
+      },
+      {
         "command": "haramAi.project.scaffold",
         "title": "Haram AI Agent: Scaffold Project",
         "category": "Haram AI Agent",
@@ -178,13 +202,56 @@
           "type": "string",
           "default": "09:00",
           "description": "📋 매일 자동 데일리 브리핑 시각 (HH:MM, 24시간 형식). 비워두거나 off로 설정하면 자동 실행하지 않습니다."
+        },
+        "haramAi.codexExecutablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Codex executable path for Codex Workflow. Leave empty to use PATH."
+        },
+        "haramAi.codexDefaultContextMode": {
+          "type": "string",
+          "default": "fresh",
+          "enum": [
+            "fresh",
+            "resume",
+            "compact",
+            "fork",
+            "reset"
+          ],
+          "description": "Default context mode for Codex Workflow subagent threads."
+        },
+        "haramAi.codexRuntime": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "app-server",
+            "sdk"
+          ],
+          "description": "Runtime for Codex Workflow. auto uses SDK for read-only/automation runs and app-server for multi-agent/context-control runs."
+        },
+        "haramAi.codexRequirePushApproval": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require explicit UI approval before Codex Workflow pushes git commits."
+        },
+        "haramAi.codexMaxRepairLoops": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Maximum coder repair loops after QA failure in Codex Workflow."
         }
       }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "esbuild src/extension.ts --bundle --platform=node --external:vscode --outfile=out/extension.js",
+    "compile": "npm run compile:extension && npm run compile:workflow",
+    "compile:extension": "esbuild src/extension.ts --bundle --platform=node --external:vscode --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk --outfile=out/extension.js",
+    "compile:workflow": "esbuild src/workflowApp/cli.ts --bundle --platform=node --outfile=out/workflow-app/cli.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk && esbuild src/workflowApp/electronMain.ts --bundle --platform=node --outfile=out/workflow-app/electronMain.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk",
+    "workflow:serve": "node out/workflow-app/cli.js --open",
+    "workflow:electron": "npx electron out/workflow-app/electronMain.js",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile"
   },
@@ -196,6 +263,8 @@
     "typescript": "^5.1.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openai/codex-sdk": "^0.134.0",
     "axios": "^1.16.1",
     "jsdom": "^29.0.2"
   }

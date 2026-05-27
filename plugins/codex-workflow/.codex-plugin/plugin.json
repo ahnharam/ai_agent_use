@@ -1,0 +1,25 @@
+{
+  "name": "codex-workflow",
+  "version": "0.1.0+codex.20260527100335",
+  "description": "Codex Workflow plugin",
+  "author": {
+    "name": "Haram AI Agent"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Workflow",
+    "shortDescription": "Start and monitor local multi-agent Codex workflows",
+    "longDescription": "Codex Workflow connects Codex Desktop to a local Workflow App. Use it to start repository workflows, inspect status, open the monitoring app, and cancel runs.",
+    "developerName": "Haram AI Agent",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Start a Codex Workflow run for this repository"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

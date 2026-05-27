@@ -1346,8 +1346,41 @@ body.corp-on .agent-dock::before{
   font-size:11px;color:rgba(251,191,36,.55);font-style:italic;padding:6px;
 }
 
+.cw-panel{position:fixed;inset:44px 10px 72px;background:rgba(4,8,6,.96);border:1px solid rgba(0,255,65,.28);border-radius:8px;box-shadow:0 18px 60px rgba(0,0,0,.72),0 0 28px rgba(0,255,65,.08);z-index:500;display:flex;flex-direction:column;overflow:hidden}
+.cw-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 12px;border-bottom:1px solid var(--border2);background:rgba(0,18,5,.72)}
+.cw-title{font-size:12px;font-weight:800;color:var(--text-bright);letter-spacing:.2px}
+.cw-sub{font-family:'SF Mono',monospace;font-size:9px;color:var(--text-dim);margin-top:2px}
+.cw-close{width:26px;height:26px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.03);color:var(--text);cursor:pointer}
+.cw-body{padding:12px;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.cw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cw-input{width:100%;min-height:64px;background:var(--input-bg);border:1px solid var(--border2);color:var(--text-bright);border-radius:7px;padding:9px 10px;font-size:12px;line-height:1.45}
+.cw-select{height:30px;max-width:150px}
+.cw-btn{border:1px solid var(--border2);background:rgba(255,255,255,.04);color:var(--text);border-radius:7px;padding:7px 10px;font-size:11px;font-family:inherit;cursor:pointer}
+.cw-btn:hover{border-color:var(--accent);color:var(--text-bright);background:rgba(0,255,65,.08)}
+.cw-btn.primary{background:var(--accent);border-color:var(--accent);color:#000;font-weight:800}
+.cw-btn.danger{border-color:rgba(255,82,82,.4);color:#ff8a8a}
+.cw-btn[disabled]{opacity:.35;cursor:not-allowed}
+.cw-box{border:1px solid var(--border2);border-radius:8px;background:rgba(255,255,255,.025);padding:10px}
+.cw-box-title{font-size:10px;font-weight:800;text-transform:uppercase;color:var(--accent);letter-spacing:1px;margin-bottom:7px}
+.cw-meta{font-family:'SF Mono',monospace;font-size:10px;color:var(--text-dim);line-height:1.6;word-break:break-all}
+.cw-pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border2);border-radius:999px;padding:3px 8px;font-size:10px;color:var(--text);background:rgba(255,255,255,.03)}
+.cw-pill.ok{color:#64ff8a;border-color:rgba(100,255,138,.35)}
+.cw-pill.warn{color:#ffcc66;border-color:rgba(255,204,102,.4)}
+.cw-pill.bad{color:#ff8a8a;border-color:rgba(255,82,82,.4)}
+.cw-stage,.cw-agent{display:grid;grid-template-columns:88px 1fr;gap:8px;padding:8px 0;border-top:1px solid rgba(255,255,255,.06)}
+.cw-stage:first-child,.cw-agent:first-child{border-top:none}
+.cw-name{font-family:'SF Mono',monospace;font-size:10px;color:var(--text-bright);word-break:break-word}
+.cw-status{font-size:10px;font-weight:800;text-transform:uppercase}
+.cw-status.running{color:#00e5ff}
+.cw-status.completed{color:#64ff8a}
+.cw-status.failed,.cw-status.blocked{color:#ff8a8a}
+.cw-status.pending,.cw-status.idle,.cw-status.reset{color:var(--text-dim)}
+.cw-summary{font-size:11px;color:var(--text);line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.cw-actions{display:flex;gap:7px;flex-wrap:wrap}
+.cw-empty{color:var(--text-dim);font-size:11px;font-style:italic}
+
 </style></head><body class="init">
-<div class="header"><div class="header-left"><div class="logo">✦</div><span class="brand">Haram AI Agent</span><span class="brand-suffix" id="brandSuffix"></span></div><div class="header-right"><select id="modelSel"></select><button class="ad-chip" id="adChip" type="button" data-expanded="false" title="specialist 모델 매핑 — 클릭해서 펼치기"><span class="adc-model" id="adcModel">…</span><span class="adc-caret">▾</span></button><button class="btn-icon" id="corporateBtn" title="AI 1인 기업 모드 (Solo Mode) — 나만의 에이전트 팀이 자동으로 일합니다 (현재: OFF)" style="opacity:0.5">👔</button><button class="btn-icon" id="brainBtn" title="내 지식 관리">🧠</button><button class="btn-icon" id="historyBtn" title="이전 대화 보기 — 새 대화를 시작해도 이전 대화는 자동 보관됩니다">📂</button><button class="btn-icon" id="newChatBtn" title="새 대화 시작 (이전 대화는 자동 보관)">+</button><div class="more-wrap"><button class="btn-icon" id="moreBtn" title="더보기">…</button><div class="more-menu" id="moreMenu" hidden><button class="more-item" id="internetBtn" title="DuckDuckGo로 웹 검색 — AI가 결과를 읽어와 답변에 반영">🌐 인터넷 검색</button><button class="more-item" id="thinkingBtn" title="AI의 사고 흐름을 별도 패널에 그래프로 시각화 (지식 노드 연결 표시)">🎬 Thinking 시각화</button><button class="more-item" id="skillLibBtn" title="에이전트 스킬·도구 카탈로그 — 내가 만든 것 + 기본 제공 모두 한 곳에서">🛠 내 스킬 라이브러리</button><button class="more-item" id="settingsBtn" title="모델·서버 주소·시스템 프롬프트·키 등 모든 설정">⚙️ 설정</button></div></div></div></div>
+<div class="header"><div class="header-left"><div class="logo">✦</div><span class="brand">Haram AI Agent</span><span class="brand-suffix" id="brandSuffix"></span></div><div class="header-right"><select id="modelSel"></select><button class="ad-chip" id="adChip" type="button" data-expanded="false" title="specialist 모델 매핑 — 클릭해서 펼치기"><span class="adc-model" id="adcModel">…</span><span class="adc-caret">▾</span></button><button class="btn-icon" id="corporateBtn" title="AI 1인 기업 모드 (Solo Mode) — 나만의 에이전트 팀이 자동으로 일합니다 (현재: OFF)" style="opacity:0.5">👔</button><button class="btn-icon" id="brainBtn" title="내 지식 관리">🧠</button><button class="btn-icon" id="historyBtn" title="이전 대화 보기 — 새 대화를 시작해도 이전 대화는 자동 보관됩니다">📂</button><button class="btn-icon" id="newChatBtn" title="새 대화 시작 (이전 대화는 자동 보관)">+</button><div class="more-wrap"><button class="btn-icon" id="moreBtn" title="더보기">…</button><div class="more-menu" id="moreMenu" hidden><button class="more-item" id="internetBtn" title="DuckDuckGo로 웹 검색 — AI가 결과를 읽어와 답변에 반영">🌐 인터넷 검색</button><button class="more-item" id="thinkingBtn" title="AI의 사고 흐름을 별도 패널에 그래프로 시각화 (지식 노드 연결 표시)">🎬 Thinking 시각화</button><button class="more-item" id="codexWorkflowBtn" title="Codex app-server 기반 서브에이전트 워크플로우">⌘ Codex Workflow</button><button class="more-item" id="skillLibBtn" title="에이전트 스킬·도구 카탈로그 — 내가 만든 것 + 기본 제공 모두 한 곳에서">🛠 내 스킬 라이브러리</button><button class="more-item" id="settingsBtn" title="모델·서버 주소·시스템 프롬프트·키 등 모든 설정">⚙️ 설정</button></div></div></div></div>
 <!-- v2.89.116 — 1인 기업 모드 specialist 모델 dock. 일반 모드에선 숨김.
      body.corp-on이 들어오면 헤더의 #modelSel 자리에서 9명 specialist의
      모델 매핑이 한 줄로 보이고, 클릭하면 인라인 popover로 변경. -->
@@ -1400,7 +1433,7 @@ window.addEventListener('unhandledrejection', function(event) {
 try {
 const vscode=acquireVsCodeApi(),chat=document.getElementById('chat'),input=document.getElementById('input'),
 sendBtn=document.getElementById('sendBtn'),stopBtn=document.getElementById('stopBtn'),
-modelSel=document.getElementById('modelSel'),newChatBtn=document.getElementById('newChatBtn'),settingsBtn=document.getElementById('settingsBtn'),brainBtn=document.getElementById('brainBtn'),thinkingBtn=document.getElementById('thinkingBtn'),
+modelSel=document.getElementById('modelSel'),newChatBtn=document.getElementById('newChatBtn'),settingsBtn=document.getElementById('settingsBtn'),brainBtn=document.getElementById('brainBtn'),thinkingBtn=document.getElementById('thinkingBtn'),codexWorkflowBtn=document.getElementById('codexWorkflowBtn'),
 internetBtn=document.getElementById('internetBtn'),attachBtn=document.getElementById('attachBtn'),injectLocalBtn=document.getElementById('injectLocalBtn'),fileInput=document.getElementById('fileInput'),attachPreview=document.getElementById('attachPreview'),
 thinkingBar=document.getElementById('thinkingBar'),corporateBtn=document.getElementById('corporateBtn'),agentBoard=document.getElementById('agentBoard'),abGrid=document.getElementById('abGrid'),abSvg=document.getElementById('abSvg'),abFolder=document.getElementById('abFolder'),abCompanyName=document.getElementById('abCompanyName'),abFolderText=document.getElementById('abFolderText'),brandSuffix=document.getElementById('brandSuffix');
 let loader=null,sending=false,pendingFiles=[],internetEnabled=false,corporateMode=false,officeOpen=false;
@@ -2301,9 +2334,117 @@ function _sessionRowHtml(s){
 }
 function _escapeHtml(s){ return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function _escapeAttr(s){ return _escapeHtml(s).replace(/"/g,'&quot;'); }
+let _codexWorkflowState=null,_codexWorkflowEvent=null,_codexPanel=null;
+function _cwStatusClass(s){
+  s=String(s||'idle');
+  if(s==='completed')return 'completed';
+  if(s==='running')return 'running';
+  if(s==='failed'||s==='blocked')return s;
+  return 'pending';
+}
+function _cwShort(s,n){s=String(s||'');return s.length>n?s.slice(0,n)+'...':s;}
+function openCodexWorkflowPanel(){
+  if(!_codexPanel){
+    _codexPanel=document.createElement('div');
+    _codexPanel.className='cw-panel';
+    document.body.appendChild(_codexPanel);
+  }
+  _renderCodexWorkflowPanel();
+  vscode.postMessage({type:'codexWorkflowGetState'});
+}
+function _closeCodexWorkflowPanel(){
+  if(_codexPanel){_codexPanel.remove();_codexPanel=null;}
+}
+function _renderCodexWorkflowPanel(){
+  if(!_codexPanel)return;
+  const state=_codexWorkflowState||{};
+  const run=state.run||null;
+  const running=!!state.running;
+  const eventMsg=(_codexWorkflowEvent&&_codexWorkflowEvent.message)||'';
+  const prompt=run&&run.userPrompt?run.userPrompt:'';
+  const mode=(run&&run.contextMode)||'fresh';
+  const exeOk=!!state.executableOk;
+  const exeMsg=state.executableMessage||'Not checked yet.';
+  const exe=state.executable||'codex';
+  const stages=run&&Array.isArray(run.stages)?run.stages:[];
+  const agents=run&&run.agents?Object.keys(run.agents).map(k=>run.agents[k]):[];
+  const git=run&&run.git?run.git:{};
+  const artifacts=run&&run.artifacts?run.artifacts:{};
+  const canCommit=run&&run.status==='pendingCommitApproval';
+  const canPush=run&&run.status==='pendingPushApproval';
+  const status=run?run.status:'idle';
+  _codexPanel.innerHTML=
+    '<div class="cw-head">'+
+      '<div><div class="cw-title">Codex Workflow</div><div class="cw-sub">app-server subagents - docs - git - coder - QA - summary</div></div>'+
+      '<button class="cw-close" id="cwClose" title="Close">x</button>'+
+    '</div>'+
+    '<div class="cw-body">'+
+      '<div class="cw-box">'+
+        '<div class="cw-row" style="justify-content:space-between">'+
+          '<span class="cw-pill '+(running?'warn':(status==='completed'?'ok':status==='blocked'||status==='failed'?'bad':''))+'">Run: '+_escapeHtml(status)+'</span>'+
+          '<span class="cw-pill '+(exeOk?'ok':'warn')+'">Codex: '+(exeOk?'ready':'diagnostic')+'</span>'+
+        '</div>'+
+        '<div class="cw-meta" style="margin-top:7px">exe: '+_escapeHtml(exe)+'<br>'+_escapeHtml(exeMsg)+(eventMsg?'<br>event: '+_escapeHtml(eventMsg):'')+'</div>'+
+      '</div>'+
+      '<div class="cw-box">'+
+        '<div class="cw-box-title">Start / Resume</div>'+
+        '<textarea class="cw-input" id="cwPrompt" placeholder="Describe the task for Codex Workflow">'+_escapeHtml(prompt)+'</textarea>'+
+        '<div class="cw-row" style="margin-top:8px">'+
+          '<select class="cw-select" id="cwMode">'+['fresh','resume','compact','fork','reset'].map(m=>'<option value="'+m+'" '+(m===mode?'selected':'')+'>'+m+'</option>').join('')+'</select>'+
+          '<button class="cw-btn primary" id="cwStart" '+(running?'disabled':'')+'>Start</button>'+
+          '<button class="cw-btn" id="cwResume" '+(running?'disabled':'')+'>Resume</button>'+
+          '<button class="cw-btn danger" id="cwCancel" '+(!running?'disabled':'')+'>Cancel</button>'+
+          '<button class="cw-btn" id="cwRefresh">Refresh</button>'+
+        '</div>'+
+      '</div>'+
+      '<div class="cw-box">'+
+        '<div class="cw-box-title">Approvals</div>'+
+        '<div class="cw-actions">'+
+          '<button class="cw-btn" id="cwApproveCommit" '+(!canCommit?'disabled':'')+'>Approve Commit</button>'+
+          '<button class="cw-btn" id="cwApprovePush" '+(!canPush?'disabled':'')+'>Approve Push</button>'+
+        '</div>'+
+        '<div class="cw-meta" style="margin-top:7px">'+
+          'branch: '+_escapeHtml(git.branch||'')+'<br>'+
+          'worktree: '+_escapeHtml(git.worktreePath||git.workCwd||'')+'<br>'+
+          'commit: '+_escapeHtml(git.commitHash||'')+'<br>'+
+          'changed: '+_escapeHtml((git.changedFiles||[]).slice(0,8).join(', '))+
+        '</div>'+
+      '</div>'+
+      '<div class="cw-box">'+
+        '<div class="cw-box-title">Stages</div>'+
+        (stages.length?stages.map(s=>'<div class="cw-stage"><div><div class="cw-name">'+_escapeHtml(s.id)+'</div><div class="cw-status '+_cwStatusClass(s.status)+'">'+_escapeHtml(s.status||'pending')+'</div></div><div class="cw-summary">'+_escapeHtml(s.outputSummary||s.error||s.inputSummary||'')+'</div></div>').join(''):'<div class="cw-empty">No stages yet.</div>')+
+      '</div>'+
+      '<div class="cw-box">'+
+        '<div class="cw-box-title">Agents</div>'+
+        (agents.length?agents.map(a=>'<div class="cw-agent"><div><div class="cw-name">'+_escapeHtml(a.role)+'</div><div class="cw-status '+_cwStatusClass(a.status)+'">'+_escapeHtml(a.status||'idle')+'</div></div><div><div class="cw-meta">thread: '+_escapeHtml(_cwShort(a.threadId||'',46))+'</div><div class="cw-summary">'+_escapeHtml(a.lastError||a.lastSummary||'')+'</div><div class="cw-actions" style="margin-top:6px"><button class="cw-btn" data-cw-compact="'+_escapeAttr(a.role)+'">Compact</button><button class="cw-btn" data-cw-reset="'+_escapeAttr(a.role)+'">Reset</button></div></div></div>').join(''):'<div class="cw-empty">No agents yet.</div>')+
+      '</div>'+
+      '<div class="cw-box">'+
+        '<div class="cw-box-title">Artifacts</div>'+
+        '<div class="cw-summary">'+_escapeHtml(artifacts.finalSummary||artifacts.docSummary||artifacts.qaSummary||artifacts.coderSummary||artifacts.docsSummary||'No artifact summary yet.')+'</div>'+
+      '</div>'+
+    '</div>';
+  const $=id=>_codexPanel.querySelector('#'+id);
+  $('cwClose')?.addEventListener('click',_closeCodexWorkflowPanel);
+  $('cwRefresh')?.addEventListener('click',()=>vscode.postMessage({type:'codexWorkflowGetState'}));
+  $('cwStart')?.addEventListener('click',()=>{
+    const p=$('cwPrompt')?.value||'';
+    const m=$('cwMode')?.value||'fresh';
+    vscode.postMessage({type:'codexWorkflowStart',prompt:p,contextMode:m});
+  });
+  $('cwResume')?.addEventListener('click',()=>{
+    const m=$('cwMode')?.value||'resume';
+    vscode.postMessage({type:'codexWorkflowResume',contextMode:m});
+  });
+  $('cwCancel')?.addEventListener('click',()=>vscode.postMessage({type:'codexWorkflowCancel'}));
+  $('cwApproveCommit')?.addEventListener('click',()=>vscode.postMessage({type:'codexWorkflowApproveCommit'}));
+  $('cwApprovePush')?.addEventListener('click',()=>vscode.postMessage({type:'codexWorkflowApprovePush'}));
+  _codexPanel.querySelectorAll('[data-cw-compact]').forEach(b=>b.addEventListener('click',()=>vscode.postMessage({type:'codexWorkflowCompactAgent',role:b.getAttribute('data-cw-compact')})));
+  _codexPanel.querySelectorAll('[data-cw-reset]').forEach(b=>b.addEventListener('click',()=>vscode.postMessage({type:'codexWorkflowResetAgent',role:b.getAttribute('data-cw-reset')})));
+}
 if (historyBtn) historyBtn.addEventListener('click', openSessionsPanel);
 settingsBtn.addEventListener('click',()=>{vscode.postMessage({type:'openSettings'});closeMoreMenu();});
 const skillLibBtn=document.getElementById('skillLibBtn');
+if(codexWorkflowBtn){codexWorkflowBtn.addEventListener('click',()=>{closeMoreMenu();openCodexWorkflowPanel();});}
 if(skillLibBtn){skillLibBtn.addEventListener('click',()=>{closeMoreMenu();showSkillLibrary();});}
 const moreBtn=document.getElementById('moreBtn');
 const moreMenu=document.getElementById('moreMenu');
@@ -4641,6 +4782,17 @@ function showReportCard(brief,report,sessionPath,sessionRel){
 let streamEl=null,streamBody=null;
 window.addEventListener('message',e=>{const msg=e.data;switch(msg.type){
   case 'response':hideLoader();setSending(false);addMsg(msg.value,'ai');break;
+  case 'codexWorkflowOpen':
+    openCodexWorkflowPanel();
+    break;
+  case 'codexWorkflowState':
+    _codexWorkflowState=msg.state||null;
+    _codexWorkflowEvent=msg.event||null;
+    if(_codexPanel)_renderCodexWorkflowPanel();
+    break;
+  case 'codexWorkflowToast':
+    if(msg.value)addMsg(msg.value,'error');
+    break;
 
   case 'brainInject':showInjectCard(msg.title,msg.relPath);break;
   case 'skillInject':showSkillCard(msg);break;

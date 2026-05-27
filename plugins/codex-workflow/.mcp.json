@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codex-workflow": {
+      "command": "node",
+      "args": ["./scripts/mcp-server.js"]
+    }
+  }
+}
