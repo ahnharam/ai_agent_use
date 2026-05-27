@@ -30,7 +30,7 @@ const tools = [
         runtime: { type: 'string', enum: ['auto', 'app-server', 'sdk'], default: 'auto' },
         mode: { type: 'string', enum: ['fresh', 'resume', 'compact', 'fork', 'reset'], description: 'Alias for contextMode.' },
         approvalPolicy: { type: 'string', enum: ['never', 'on-request', 'on-failure', 'untrusted'], default: 'never' },
-        runKind: { type: 'string', enum: ['automation', 'readOnly', 'approvalRequired', 'multiAgent', 'contextControl', 'codeChange'], default: 'multiAgent' }
+        runKind: { type: 'string', enum: ['automation', 'readOnly', 'approvalRequired', 'multiAgent', 'contextControl', 'codeChange', 'gitOperation'], default: 'multiAgent' }
       },
       required: ['cwd', 'prompt']
     }

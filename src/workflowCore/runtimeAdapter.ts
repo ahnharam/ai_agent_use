@@ -322,7 +322,8 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
 export function resolveSelectedRuntime(preferred: CodexRuntime | undefined, runKind: WorkflowRunKind | undefined): SelectedCodexRuntime {
     if (preferred === 'sdk') return 'sdk';
     if (preferred === 'app-server') return 'app-server';
-    return runKind === 'automation' || runKind === 'readOnly' ? 'sdk' : 'app-server';
+    if (runKind === 'automation' || runKind === 'readOnly') return 'sdk';
+    return 'app-server';
 }
 
 export function canRunWithSdk(runKind: WorkflowRunKind | undefined): boolean {

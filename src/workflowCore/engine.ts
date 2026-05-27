@@ -341,6 +341,10 @@ export class CodexWorkflowController {
         this.emitState('Codex Workflow started.');
 
         try {
+            if (run.runKind === 'gitOperation') {
+                await this.executeGitOperation(store, run);
+                return;
+            }
             const runtime = await this.ensureRuntime(run, run.cwd);
             await this.checkAuth(runtime, store, run);
             if (run.selectedRuntime === 'sdk' && canRunWithSdk(run.runKind)) {
@@ -447,6 +451,125 @@ export class CodexWorkflowController {
             this.running = false;
             this.emitState();
         }
+    }
+
+    private async executeGitOperation(store: CodexWorkflowStore, run: WorkflowRun): Promise<void> {
+        store.upsertStage(run, {
+            id: 'git-inspect',
+            role: 'git-manager',
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            inputSummary: run.userPrompt.slice(0, 300),
+        });
+        store.saveRun(run);
+        store.appendEvent(run, 'gitOperation.started', { cwd: run.cwd });
+
+        const root = gitSafe(['rev-parse', '--show-toplevel'], run.cwd)?.trim();
+        if (!root) {
+            run.git.isRepo = false;
+            run.status = 'blocked';
+            run.artifacts.finalSummary = 'Git operation blocked: cwd is not inside a git repository.';
+            store.upsertStage(run, {
+                id: 'git-inspect',
+                role: 'git-manager',
+                status: 'failed',
+                error: run.artifacts.finalSummary,
+                finishedAt: new Date().toISOString(),
+            });
+            store.saveRun(run);
+            this.emitState(run.artifacts.finalSummary);
+            return;
+        }
+
+        const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], root).trim();
+        if (!branch || branch === 'HEAD') throw new Error('Git operation blocked: detached HEAD is not supported.');
+        const changedFiles = gitLines(['status', '--short'], root);
+        const remote = gitSafe(['remote', 'get-url', 'origin'], root)?.trim();
+        const tracking = gitSafe(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], root)?.trim()
+            || (gitSafe(['rev-parse', '--verify', `origin/${branch}`], root) ? `origin/${branch}` : '');
+        const counts = tracking ? parseAheadBehind(gitSafe(['rev-list', '--left-right', '--count', `HEAD...${tracking}`], root)) : { ahead: 0, behind: 0 };
+        const head = git(['rev-parse', '--short', 'HEAD'], root).trim();
+
+        run.git.isRepo = true;
+        run.git.originalCwd = root;
+        run.git.workCwd = root;
+        run.git.originalBranch = branch;
+        run.git.branch = branch;
+        run.git.dirty = changedFiles.length > 0;
+        run.git.changedFiles = changedFiles;
+        run.git.commitHash = head;
+        run.git.pushRemote = remote ? 'origin' : undefined;
+        run.git.pushBranch = branch;
+
+        const summary = [
+            `Git operation inspected ${root}.`,
+            `Branch: ${branch}`,
+            `HEAD: ${head}`,
+            tracking ? `Tracking: ${tracking} (ahead ${counts.ahead}, behind ${counts.behind})` : 'Tracking: none',
+            `Changed files: ${changedFiles.length}`,
+        ].join('\n');
+        store.upsertStage(run, {
+            id: 'git-inspect',
+            role: 'git-manager',
+            status: 'completed',
+            outputSummary: summary,
+            finishedAt: new Date().toISOString(),
+        });
+        store.appendEvent(run, 'gitOperation.inspected', {
+            root,
+            branch,
+            head,
+            tracking,
+            ahead: counts.ahead,
+            behind: counts.behind,
+            changedFiles: changedFiles.length,
+        });
+
+        if (changedFiles.length > 0) {
+            const diffHash = gitDiffHash(root);
+            run.git.diffHash = diffHash;
+            run.approvals.commitRequired = true;
+            upsertApproval(run, {
+                id: `${run.id}:commit`,
+                runId: run.id,
+                type: 'commit',
+                status: 'pending',
+                summary: `Commit ${changedFiles.length} changed file(s) on ${branch}.`,
+                diff: gitOperationDiff(root),
+                validationHash: diffHash,
+                createdAt: new Date().toISOString(),
+            });
+            run.status = 'pendingCommitApproval';
+            run.artifacts.gitPlan = `${summary}\n\nCommit approval is required before Workflow App can create a commit.`;
+            run.artifacts.finalSummary = run.artifacts.gitPlan;
+            store.saveRun(run);
+            this.emitState('Git operation is waiting for commit approval.');
+            return;
+        }
+
+        if (remote && counts.ahead > 0) {
+            run.approvals.pushRequired = true;
+            upsertApproval(run, {
+                id: `${run.id}:push`,
+                runId: run.id,
+                type: 'push',
+                status: 'pending',
+                summary: `Push ${counts.ahead} commit(s) from ${branch} to origin.`,
+                validationHash: head,
+                createdAt: new Date().toISOString(),
+            });
+            run.status = 'pendingPushApproval';
+            run.artifacts.gitPlan = `${summary}\n\nPush approval is required before Workflow App can push.`;
+            run.artifacts.finalSummary = run.artifacts.gitPlan;
+            store.saveRun(run);
+            this.emitState('Git operation is waiting for push approval.');
+            return;
+        }
+
+        run.status = 'completed';
+        run.artifacts.finalSummary = `${summary}\n\nNo commit or push is required.`;
+        store.saveRun(run);
+        this.emitState('Git operation completed with no pending work.');
     }
 
     private async executeSdkRun(store: CodexWorkflowStore, run: WorkflowRun): Promise<void> {
@@ -819,6 +942,9 @@ function shouldSkipImplementation(prompt: string): boolean {
 }
 
 function inferRunKind(prompt: string): WorkflowRunKind {
+    const asksGitOnly = /(git|commit|push|branch|worktree|origin|깃|커밋|푸시|브랜치|워크트리)/i.test(prompt);
+    const asksImplementation = /(implement|fix|add|change|create|build|write|edit|code|구현|수정|추가|작성|코드)/i.test(prompt);
+    if (asksGitOnly && !asksImplementation) return 'gitOperation';
     if (shouldSkipImplementation(prompt)) return 'readOnly';
     return 'multiAgent';
 }
@@ -875,6 +1001,38 @@ function gitDiffHash(cwd: string): string {
     const status = gitSafe(['status', '--porcelain'], cwd) || '';
     const diff = gitSafe(['diff', '--binary'], cwd) || '';
     return crypto.createHash('sha256').update(`${status}\n${diff}`).digest('hex');
+}
+
+function gitOperationDiff(cwd: string): string {
+    const status = gitSafe(['status', '--short'], cwd) || '';
+    const stat = gitSafe(['diff', '--stat'], cwd) || '';
+    const stagedStat = gitSafe(['diff', '--cached', '--stat'], cwd) || '';
+    const diff = gitSafe(['diff', '--', '.'], cwd) || '';
+    const stagedDiff = gitSafe(['diff', '--cached', '--', '.'], cwd) || '';
+    return summarize([
+        '$ git status --short',
+        status.trim() || '(clean)',
+        '',
+        '$ git diff --stat',
+        stat.trim() || '(no unstaged diff stat)',
+        '',
+        '$ git diff --cached --stat',
+        stagedStat.trim() || '(no staged diff stat)',
+        '',
+        '$ git diff',
+        diff.trim(),
+        '',
+        '$ git diff --cached',
+        stagedDiff.trim(),
+    ].join('\n'), 20000);
+}
+
+function parseAheadBehind(output: string | null): { ahead: number; behind: number } {
+    const parts = (output || '').trim().split(/\s+/).map(n => Number(n));
+    return {
+        ahead: Number.isFinite(parts[0]) ? parts[0] : 0,
+        behind: Number.isFinite(parts[1]) ? parts[1] : 0,
+    };
 }
 
 function upsertApproval(run: WorkflowRun, approval: ApprovalRequest): ApprovalRequest {

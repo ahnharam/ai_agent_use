@@ -525,7 +525,7 @@ function normalizeRuntime(value: any): CodexRuntime {
 
 function normalizeRunKind(value: any): WorkflowRunKind {
     const runKind = String(value || 'multiAgent');
-    const allowed = ['automation', 'readOnly', 'approvalRequired', 'multiAgent', 'contextControl', 'codeChange'];
+    const allowed = ['automation', 'readOnly', 'approvalRequired', 'multiAgent', 'contextControl', 'codeChange', 'gitOperation'];
     return allowed.includes(runKind) ? runKind as WorkflowRunKind : 'multiAgent';
 }
 

@@ -30,7 +30,7 @@ export function workflowAppHtml(authToken = ''): string {
       <div class="row">
         <select id="mode"><option>fresh</option><option>resume</option><option>compact</option><option>fork</option><option>reset</option></select>
         <select id="runtime"><option>auto</option><option>app-server</option><option>sdk</option></select>
-        <select id="runKind"><option>multiAgent</option><option>readOnly</option><option>automation</option><option>approvalRequired</option><option>contextControl</option><option>codeChange</option></select>
+        <select id="runKind"><option>multiAgent</option><option>gitOperation</option><option>readOnly</option><option>automation</option><option>approvalRequired</option><option>contextControl</option><option>codeChange</option></select>
         <button onclick="startRun()">Start</button>
       </div>
     </div>
@@ -60,6 +60,8 @@ async function refresh(){
     document.getElementById('health').textContent='port '+h.port+' · active '+h.activeRuns+' · queued '+h.queuedRuns+' · runtime '+(rs.defaultRuntime||'auto')+' · sdk '+(h.sdkAvailable?'ok':'no');
     runs=await api('/api/runs');
     renderRuns();
+    const hashId=decodeURIComponent((location.hash||'').replace(/^#/,''));
+    if(!selected&&hashId&&runs.some(r=>r.id===hashId)){await loadRun(hashId);return}
     if(selected) await loadRun(selected.id);
   }catch(e){document.getElementById('health').textContent=e.message}
 }
@@ -68,6 +70,7 @@ function renderRuns(){
   root.innerHTML=runs.map(r=>'<div class="run '+(selected&&selected.id===r.id?'active':'')+'" onclick="loadRun(\\''+r.id.replace(/'/g,'')+'\\')"><div>'+badge(r.status)+' <b>'+esc((r.prompt||r.userPrompt||'').slice(0,70))+'</b></div><div class="id">'+esc(r.id)+'</div><div class="muted">'+esc(runtimeLabel(r))+'</div><div class="muted">'+esc(r.cwd)+'</div></div>').join('')||'<div class="muted">No runs</div>'
 }
 async function loadRun(id){
+  if(location.hash!==('#'+encodeURIComponent(id))) location.hash=encodeURIComponent(id);
   selected=await api('/api/runs/'+encodeURIComponent(id));
   selected.events=await api('/api/runs/'+encodeURIComponent(id)+'/events?limit=80');
   renderRuns();

@@ -22,6 +22,7 @@ Runtime policy:
 - Use `runKind: "automation"` for simple one-shot SDK-suitable tasks.
 - Use `runKind: "multiAgent"` for the full docs/git/coder/QA/doc-writer workflow.
 - Use `runKind: "contextControl"` when the user asks for compact/resume/fork behavior.
+- Use `runKind: "gitOperation"` when the user asks the Workflow App itself to inspect, commit, or push the current repository state.
 
 Approval policy:
 

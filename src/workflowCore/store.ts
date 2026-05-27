@@ -4,7 +4,7 @@ import * as path from 'path';
 export type CodexContextMode = 'fresh' | 'resume' | 'compact' | 'fork' | 'reset';
 export type CodexRuntime = 'auto' | 'app-server' | 'sdk';
 export type SelectedCodexRuntime = 'app-server' | 'sdk';
-export type WorkflowRunKind = 'automation' | 'readOnly' | 'approvalRequired' | 'multiAgent' | 'contextControl' | 'codeChange';
+export type WorkflowRunKind = 'automation' | 'readOnly' | 'approvalRequired' | 'multiAgent' | 'contextControl' | 'codeChange' | 'gitOperation';
 export type WorkflowStatus = 'idle' | 'queued' | 'running' | 'blocked' | 'pendingCommitApproval' | 'pendingPushApproval' | 'completed' | 'failed' | 'cancelled';
 export type StageStatus = 'pending' | 'running' | 'skipped' | 'completed' | 'failed';
 export type AgentStatus = 'idle' | 'running' | 'blocked' | 'completed' | 'failed' | 'reset';
