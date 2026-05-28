@@ -26,6 +26,19 @@ import {
     AgentRequest,
     slugify,
 } from './store';
+import {
+    agentDocumentContext,
+    rebuildDocumentCache,
+} from './documentContext';
+import {
+    runGitRoutingPreflight,
+    startWorkflowWriterLock,
+    releaseWorkflowWriterLock,
+    WorkflowWriterLockHandle,
+    acquireGitRoutingMutex,
+    GitRoutingMutexHandle,
+    gitRepositoryLockRoot,
+} from './gitRoutingSafety';
 
 export interface CodexWorkflowSnapshot {
     run: WorkflowRun | null;
@@ -59,6 +72,7 @@ export interface CodexWorkflowStartOptions {
     runKind?: WorkflowRunKind;
     approvalPolicy?: string;
     mcpSource?: string;
+    routingPreference?: 'auto' | 'force-worktree';
 }
 
 type SandboxKind = 'readOnly' | 'workspaceWrite';
@@ -171,11 +185,12 @@ export class CodexWorkflowController {
             const store = new CodexWorkflowStore(this.currentRun.cwd);
             this.currentRun.status = 'cancelled';
             store.saveRun(this.currentRun);
+            releaseWorkflowWriterLock(workflowLockRoot(this.currentRun), this.currentRun.id);
         }
         await this.runtime?.stop();
         this.runtime = null;
         this.running = false;
-        this.emitState('Codex Workflow cancelled.');
+        this.emitState('Codex 워크플로우가 취소되었습니다.');
     }
 
     public async compactAgent(role: string): Promise<void> {
@@ -185,18 +200,18 @@ export class CodexWorkflowController {
         if (!agent?.threadId) throw new Error(`No thread id for ${role}.`);
         const runtime = await this.ensureRuntime(run, run.cwd);
         await runtime.compactThread(agent.threadId);
-        agent.lastSummary = `${role} compaction requested at ${new Date().toISOString()}`;
+        agent.lastSummary = `${role} 컨텍스트 압축 요청: ${new Date().toISOString()}`;
         new CodexWorkflowStore(run.cwd).saveRun(run);
-        this.emitState(`${role} context compaction requested.`);
+        this.emitState(`${role} 컨텍스트 압축을 요청했습니다.`);
     }
 
     public resetAgent(role: string): void {
         const run = this.currentRun;
         if (!run) throw new Error('No active Codex Workflow run.');
         if (!run.agents[role]) throw new Error(`Unknown agent: ${role}`);
-        run.agents[role] = { role, status: 'reset', lastSummary: 'Thread id cleared. Next turn will start fresh.' };
+        run.agents[role] = { role, status: 'reset', lastSummary: 'thread id를 지웠습니다. 다음 turn은 새 컨텍스트로 시작합니다.' };
         new CodexWorkflowStore(run.cwd).saveRun(run);
-        this.emitState(`${role} reset.`);
+        this.emitState(`${role} 초기화 완료.`);
     }
 
     public async approveCommit(): Promise<void> {
@@ -208,20 +223,20 @@ export class CodexWorkflowController {
             const approval = pendingApproval(run, 'commit');
             const conflicts = gitConflictFiles(run.git.workCwd);
             if (conflicts.length > 0) {
-                this.blockApproval(store, run, 'commit', `Commit blocked because unresolved conflict files exist:\n${conflicts.join('\n')}`);
+                this.blockApproval(store, run, 'commit', `커밋 차단: 해결되지 않은 충돌 파일이 있습니다.\n${conflicts.join('\n')}`);
                 return;
             }
             if (approval?.validationHash && approval.validationHash !== gitDiffHash(run.git.workCwd)) {
-                this.blockApproval(store, run, 'commit', 'Git diff changed after commit approval was requested. Start or refresh the gitOperation run and review the latest diff.');
+                this.blockApproval(store, run, 'commit', '커밋 승인 요청 이후 Git diff가 변경되었습니다. gitOperation 작업을 새로 시작하거나 새로고침한 뒤 최신 diff를 다시 검토하세요.');
                 return;
             }
             const files = gitLines(['status', '--short'], run.git.workCwd);
             if (files.length === 0) {
                 run.approvals.commitRequired = false;
                 run.status = 'completed';
-                run.artifacts.finalSummary = 'No file changes to commit.';
+                run.artifacts.finalSummary = '커밋할 파일 변경이 없습니다.';
                 store.saveRun(run);
-                this.emitState('No changes to commit.');
+                this.emitState('커밋할 변경 사항이 없습니다.');
                 return;
             }
             git(['add', '.'], run.git.workCwd, 60000);
@@ -240,19 +255,19 @@ export class CodexWorkflowController {
                     runId: run.id,
                     type: 'push',
                     status: 'pending',
-                    summary: `Push branch ${run.git.branch || 'current'} to origin.`,
+                    summary: `${run.git.branch || 'current'} 브랜치를 origin에 푸시합니다.`,
                     validationHash: run.git.commitHash,
                     createdAt: new Date().toISOString(),
                 });
             }
             run.status = run.approvals.pushRequired ? 'pendingPushApproval' : 'completed';
             store.saveRun(run);
-            this.emitState(run.approvals.pushRequired ? 'Commit created. Push approval is required.' : 'Commit created.');
+            this.emitState(run.approvals.pushRequired ? '커밋이 생성되었습니다. 푸시 승인이 필요합니다.' : '커밋이 생성되었습니다.');
         } catch (e: any) {
             run.status = 'failed';
             run.git.lastError = e?.message || String(e);
             store.saveRun(run);
-            this.emitState(`Commit failed: ${run.git.lastError}`);
+            this.emitState(`커밋 실패: ${run.git.lastError}`);
             throw e;
         }
     }
@@ -260,12 +275,12 @@ export class CodexWorkflowController {
     public async approvePush(): Promise<void> {
         const run = this.currentRun;
         if (!run) throw new Error('No active Codex Workflow run.');
-        if (run.status !== 'pendingPushApproval') throw new Error('No push is waiting for approval.');
+        if (run.status !== 'pendingPushApproval') throw new Error('승인 대기 중인 푸시가 없습니다.');
         const store = new CodexWorkflowStore(run.cwd);
         try {
             const approval = pendingApproval(run, 'push');
             if (approval?.validationHash && approval.validationHash !== run.git.commitHash) {
-                this.blockApproval(store, run, 'push', 'Commit hash changed after push approval was requested. Start or refresh the gitOperation run and review the latest commit.');
+                this.blockApproval(store, run, 'push', '푸시 승인 요청 이후 커밋 해시가 변경되었습니다. gitOperation 작업을 새로 시작하거나 새로고침한 뒤 최신 커밋을 다시 검토하세요.');
                 return;
             }
             const branch = run.git.branch || git(['rev-parse', '--abbrev-ref', 'HEAD'], run.git.workCwd).trim();
@@ -274,13 +289,13 @@ export class CodexWorkflowController {
             run.git.pushBranch = branch;
             run.status = 'running';
             store.saveRun(run);
-            this.emitState(`Push started for origin/${branch}.`);
+            this.emitState(`origin/${branch} 푸시를 시작했습니다.`);
             void this.executeApprovedPush(store, run, branch);
         } catch (e: any) {
             run.status = 'failed';
             run.git.lastError = e?.message || String(e);
             store.saveRun(run);
-            this.emitState(`Push failed: ${run.git.lastError}`);
+            this.emitState(`푸시 실패: ${run.git.lastError}`);
             throw e;
         }
     }
@@ -312,20 +327,20 @@ export class CodexWorkflowController {
             run.git.pushRemote = 'origin';
             run.git.pushBranch = branch;
             run.status = 'completed';
-            run.artifacts.finalSummary = `Pushed origin/${branch} at ${run.git.commitHash}.`;
+            run.artifacts.finalSummary = `origin/${branch}에 ${run.git.commitHash} 커밋까지 푸시 완료.`;
             store.appendEvent(run, 'git.push.completed', { branch, commitHash: run.git.commitHash });
             store.saveRun(run);
-            this.emitState(`Pushed origin/${branch}.`);
+            this.emitState(`origin/${branch} 푸시 완료.`);
         } catch (e: any) {
             const message = e?.message || String(e);
             run.status = 'failed';
             run.git.lastError = /non-fast-forward|fetch first|rejected/i.test(message)
-                ? `Push rejected because the remote branch changed or is ahead. Fetch/rebase or merge, then start a new gitOperation run.\n${message}`
+                ? `원격 브랜치가 변경되었거나 앞서 있어서 푸시가 거절되었습니다. fetch/rebase 또는 merge 후 새 gitOperation 작업을 시작하세요.\n${message}`
                 : message;
             run.artifacts.finalSummary = run.git.lastError;
             store.appendEvent(run, 'git.push.failed', { branch, error: run.git.lastError });
             store.saveRun(run);
-            this.emitState(`Push failed: ${run.git.lastError}`);
+            this.emitState(`푸시 실패: ${run.git.lastError}`);
         }
     }
 
@@ -340,12 +355,12 @@ export class CodexWorkflowController {
             runId: run.id,
             type: 'merge-back',
             status: 'pending',
-            summary: `Merge ${run.git.branch} back into ${run.git.originalBranch || 'the original branch'}.`,
+            summary: `${run.git.branch} 브랜치를 ${run.git.originalBranch || '원본 브랜치'}에 병합합니다.`,
             validationHash: run.git.commitHash || gitSafe(['rev-parse', '--short', run.git.branch], run.git.workCwd)?.trim(),
             createdAt: new Date().toISOString(),
         });
         store.saveRun(run);
-        this.emitState('Merge-back approval is required.');
+        this.emitState('원본 브랜치 병합 승인이 필요합니다.');
     }
 
     public async mergeBack(): Promise<void> {
@@ -357,21 +372,21 @@ export class CodexWorkflowController {
             const approval = pendingApproval(run, 'merge-back');
             const currentHash = gitSafe(['rev-parse', '--short', run.git.branch], run.git.workCwd)?.trim();
             if (approval?.validationHash && currentHash && approval.validationHash !== currentHash) {
-                throw new Error('Branch hash changed after merge-back approval was requested.');
+                throw new Error('원본 병합 승인 요청 이후 브랜치 해시가 변경되었습니다.');
             }
             const originalStatus = gitLines(['status', '--porcelain'], run.git.originalCwd || run.cwd);
-            if (originalStatus.length > 0) throw new Error('Original working tree is dirty. Merge-back is blocked.');
+            if (originalStatus.length > 0) throw new Error('원본 작업트리가 dirty 상태입니다. 원본 병합을 차단했습니다.');
             git(['switch', run.git.originalBranch], run.git.originalCwd || run.cwd, 60000);
             git(['merge', '--no-ff', run.git.branch, '-m', `merge codex workflow: ${slugify(run.userPrompt)}`], run.git.originalCwd || run.cwd, 120000);
             run.git.mergeStatus = 'merged';
             resolveApproval(run, 'merge-back', 'approved');
             store.saveRun(run);
-            this.emitState(`Merged ${run.git.branch} into ${run.git.originalBranch}.`);
+            this.emitState(`${run.git.branch} 브랜치를 ${run.git.originalBranch}에 병합했습니다.`);
         } catch (e: any) {
             run.git.mergeStatus = /conflict/i.test(e?.message || '') ? 'conflict' : 'failed';
             run.git.lastError = e?.message || String(e);
             store.saveRun(run);
-            this.emitState(`Merge-back failed: ${run.git.lastError}`);
+            this.emitState(`원본 병합 실패: ${run.git.lastError}`);
             throw e;
         }
     }
@@ -380,10 +395,25 @@ export class CodexWorkflowController {
         const run = this.currentRun;
         if (!run) throw new Error('No active Codex Workflow run.');
         if (!run.git.worktreePath) throw new Error('No workflow worktree exists for this run.');
+        if (['running', 'queued', 'pendingCommitApproval', 'pendingPushApproval'].includes(run.status)) {
+            throw new Error('Workflow worktree cleanup is blocked while the run still has active or pending work.');
+        }
+        if (!run.git.branch?.startsWith('codex/')) {
+            throw new Error(`Workflow worktree cleanup is blocked for non-Codex branch: ${run.git.branch || '(unknown)'}`);
+        }
+        const registered = parseWorktrees(gitSafe(['worktree', 'list', '--porcelain'], run.git.originalCwd || run.cwd) || '')
+            .some(worktree => path.resolve(worktree.path).toLowerCase() === path.resolve(run.git.worktreePath!).toLowerCase());
+        if (!registered) {
+            throw new Error(`Workflow worktree cleanup is blocked because the path is not a registered git worktree: ${run.git.worktreePath}`);
+        }
+        const worktreeStatus = gitLines(['status', '--porcelain'], run.git.worktreePath);
+        if (worktreeStatus.length > 0) {
+            throw new Error(`Workflow worktree cleanup is blocked because the worktree is not clean:\n${worktreeStatus.join('\n')}`);
+        }
         git(['worktree', 'remove', run.git.worktreePath], run.git.originalCwd || run.cwd, 120000);
         run.git.mergeStatus = 'cleaned';
         new CodexWorkflowStore(run.cwd).saveRun(run);
-        this.emitState('Workflow worktree removed.');
+        this.emitState('워크플로우 워크트리를 제거했습니다.');
     }
 
     private async executeRun(store: CodexWorkflowStore, run: WorkflowRun): Promise<void> {
@@ -394,7 +424,7 @@ export class CodexWorkflowController {
         run.status = 'running';
         store.saveRun(run);
         store.appendEvent(run, 'run.started', { runtime: run.selectedRuntime, runKind: run.runKind });
-        this.emitState('Codex Workflow started.');
+        this.emitState('Codex 워크플로우가 시작되었습니다.');
 
         try {
             if (run.runKind === 'gitOperation') {
@@ -403,6 +433,7 @@ export class CodexWorkflowController {
             }
             const runtime = await this.ensureRuntime(run, run.cwd);
             await this.checkAuth(runtime, store, run);
+            await this.ensureProjectDocumentCache(store, run, runtime);
             if (run.selectedRuntime === 'sdk' && canRunWithSdk(run.runKind)) {
                 await this.executeSdkRun(store, run);
                 return;
@@ -427,11 +458,11 @@ export class CodexWorkflowController {
                 run.artifacts.finalSummary = [run.artifacts.docsSummary, run.artifacts.webResearchSummary].filter(Boolean).join('\n\n') || docs.text;
                 run.status = 'completed';
                 store.saveRun(run);
-                this.emitState('Read-only request completed; coding/git stages skipped.');
+                this.emitState('읽기 전용 요청이 완료되어 코딩/Git 단계는 생략되었습니다.');
                 return;
             }
 
-            this.prepareGit(store, run);
+            await this.prepareGit(store, run);
             const gitPlan = await this.runStage(store, run, 'git-plan', 'git-manager', 'readOnly', this.gitPlanPrompt(run));
             run.artifacts.gitPlan = summarize(gitPlan.text);
             store.saveRun(run);
@@ -491,7 +522,7 @@ export class CodexWorkflowController {
 
             if (!qaPassed(qa)) {
                 run.status = 'failed';
-                run.artifacts.finalSummary = `QA failed after ${run.repairAttempts} repair attempt(s).`;
+                run.artifacts.finalSummary = `수정 시도 ${run.repairAttempts}회 후에도 QA가 실패했습니다.`;
                 store.saveRun(run);
                 this.emitState(run.artifacts.finalSummary);
                 return;
@@ -513,18 +544,18 @@ export class CodexWorkflowController {
                     runId: run.id,
                     type: 'commit',
                     status: 'pending',
-                    summary: `Commit ${changedFiles.length} changed file(s) for this workflow run.`,
+                    summary: `이 워크플로우 작업의 변경 파일 ${changedFiles.length}개를 커밋합니다.`,
                     diff: run.artifacts.lastDiff,
                     validationHash: diffHash,
                     createdAt: new Date().toISOString(),
                 });
                 run.status = 'pendingCommitApproval';
                 store.saveRun(run);
-                this.emitState('Workflow passed QA. Commit approval is required.');
+                this.emitState('QA를 통과했습니다. 커밋 승인이 필요합니다.');
             } else {
                 run.status = 'completed';
                 store.saveRun(run);
-                this.emitState('Workflow completed with no git commit required.');
+                this.emitState('Git 커밋 없이 워크플로우가 완료되었습니다.');
             }
         } catch (e: any) {
             if (this.cancelled) {
@@ -534,7 +565,7 @@ export class CodexWorkflowController {
                 run.artifacts.finalSummary = e?.message || String(e);
             }
             store.saveRun(run);
-            this.emitState(run.artifacts.finalSummary || 'Codex Workflow blocked.');
+            this.emitState(run.artifacts.finalSummary || 'Codex 워크플로우가 차단되었습니다.');
         } finally {
             this.running = false;
             this.emitState();
@@ -556,7 +587,7 @@ export class CodexWorkflowController {
         if (!root) {
             run.git.isRepo = false;
             run.status = 'blocked';
-            run.artifacts.finalSummary = 'Git operation blocked: cwd is not inside a git repository.';
+            run.artifacts.finalSummary = 'Git 작업 차단: cwd가 Git 저장소 안에 있지 않습니다.';
             store.upsertStage(run, {
                 id: 'git-inspect',
                 role: 'git-manager',
@@ -570,7 +601,7 @@ export class CodexWorkflowController {
         }
 
         const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], root).trim();
-        if (!branch || branch === 'HEAD') throw new Error('Git operation blocked: detached HEAD is not supported.');
+        if (!branch || branch === 'HEAD') throw new Error('Git 작업 차단: detached HEAD는 지원하지 않습니다.');
         const changedFiles = gitLines(['status', '--short'], root);
         const conflictFiles = gitConflictFiles(root);
         const remote = gitSafe(['remote', 'get-url', 'origin'], root)?.trim();
@@ -592,12 +623,12 @@ export class CodexWorkflowController {
         run.git.pushBranch = branch;
 
         const summary = [
-            `Git operation inspected ${root}.`,
-            `Branch: ${branch}`,
+            `Git 작업 점검 완료: ${root}`,
+            `브랜치: ${branch}`,
             `HEAD: ${head}`,
-            tracking ? `Tracking: ${tracking} (ahead ${counts.ahead}, behind ${counts.behind})` : 'Tracking: none',
-            `Changed files: ${changedFiles.length}`,
-            conflictFiles.length > 0 ? `Conflict files: ${conflictFiles.length}` : '',
+            tracking ? `추적 브랜치: ${tracking} (로컬 ${counts.ahead}개 앞섬, 원격 ${counts.behind}개 앞섬)` : '추적 브랜치: 없음',
+            `변경 파일: ${changedFiles.length}개`,
+            conflictFiles.length > 0 ? `충돌 파일: ${conflictFiles.length}개` : '',
         ].filter(Boolean).join('\n');
         store.upsertStage(run, {
             id: 'git-inspect',
@@ -619,7 +650,7 @@ export class CodexWorkflowController {
 
         if (conflictFiles.length > 0) {
             run.status = 'blocked';
-            run.git.lastError = `Git operation blocked because unresolved conflict files exist:\n${conflictFiles.join('\n')}`;
+            run.git.lastError = `Git 작업 차단: 해결되지 않은 충돌 파일이 있습니다.\n${conflictFiles.join('\n')}`;
             run.artifacts.gitPlan = summary;
             run.artifacts.finalSummary = run.git.lastError;
             store.saveRun(run);
@@ -636,16 +667,16 @@ export class CodexWorkflowController {
                 runId: run.id,
                 type: 'commit',
                 status: 'pending',
-                summary: `Commit ${changedFiles.length} changed file(s) on ${branch}.`,
+                summary: `${branch} 브랜치의 변경 파일 ${changedFiles.length}개를 커밋합니다.`,
                 diff: gitOperationDiff(root),
                 validationHash: diffHash,
                 createdAt: new Date().toISOString(),
             });
             run.status = 'pendingCommitApproval';
-            run.artifacts.gitPlan = `${summary}\n\nCommit approval is required before Workflow App can create a commit.`;
+            run.artifacts.gitPlan = `${summary}\n\n커밋 생성을 위해 Workflow App 승인이 필요합니다.`;
             run.artifacts.finalSummary = run.artifacts.gitPlan;
             store.saveRun(run);
-            this.emitState('Git operation is waiting for commit approval.');
+            this.emitState('Git 작업이 커밋 승인을 기다리고 있습니다.');
             return;
         }
 
@@ -656,37 +687,58 @@ export class CodexWorkflowController {
                 runId: run.id,
                 type: 'push',
                 status: 'pending',
-                summary: `Push ${counts.ahead} commit(s) from ${branch} to origin.`,
+                summary: `${branch} 브랜치의 커밋 ${counts.ahead}개를 origin에 푸시합니다.`,
                 validationHash: head,
                 createdAt: new Date().toISOString(),
             });
             run.status = 'pendingPushApproval';
-            run.artifacts.gitPlan = `${summary}\n\nPush approval is required before Workflow App can push.`;
+            run.artifacts.gitPlan = `${summary}\n\n푸시를 위해 Workflow App 승인이 필요합니다.`;
             run.artifacts.finalSummary = run.artifacts.gitPlan;
             store.saveRun(run);
-            this.emitState('Git operation is waiting for push approval.');
+            this.emitState('Git 작업이 푸시 승인을 기다리고 있습니다.');
             return;
         }
 
         run.status = 'completed';
-        run.artifacts.finalSummary = `${summary}\n\nNo commit or push is required.`;
+        run.artifacts.finalSummary = `${summary}\n\n커밋이나 푸시가 필요하지 않습니다.`;
         store.saveRun(run);
-        this.emitState('Git operation completed with no pending work.');
+        this.emitState('대기 중인 작업 없이 Git 작업이 완료되었습니다.');
     }
 
     private async executeSdkRun(store: CodexWorkflowStore, run: WorkflowRun): Promise<void> {
         const sandbox: SandboxKind = run.runKind === 'readOnly' || shouldSkipImplementation(run.userPrompt) ? 'readOnly' : 'workspaceWrite';
-        if (sandbox === 'workspaceWrite') this.prepareGit(store, run);
+        if (sandbox === 'workspaceWrite') await this.prepareGit(store, run);
         const runtime = await this.ensureRuntime(run, run.git.workCwd || run.cwd);
         store.upsertStage(run, { id: 'sdk-run', role: 'sdk', status: 'running', startedAt: new Date().toISOString(), inputSummary: run.userPrompt.slice(0, 300) });
         const prompt = sandbox === 'readOnly'
-            ? `Answer this Codex Workflow read-only request directly.\n\nUser request:\n${run.userPrompt}\n\nDo not edit files. Do not run shell commands unless the request cannot be answered without them. If the user asks for an exact phrase, return only that phrase.`
+            ? `이 Codex Workflow 읽기 전용 요청에 직접 답하세요.\n\n사용자 요청:\n${run.userPrompt}\n\n파일을 수정하지 마세요. 반드시 필요한 경우가 아니면 shell command를 실행하지 마세요. 사용자가 정확한 문구만 요구했다면 그 문구만 반환하세요. 답변과 요약은 한국어로 작성하세요.`
             : `Run this Codex Workflow automation task using the SDK runtime.\n\nUser request:\n${run.userPrompt}\n\nReturn a concise Korean summary of work, checks, and remaining risk.`;
-        const result = await runtime.runStandalone!(prompt, {
-            cwd: run.git.workCwd || run.cwd,
-            approvalPolicy: run.approvalPolicy || 'never',
-            sandbox,
-        });
+        let lockHandle: WorkflowWriterLockHandle | undefined;
+        let result: CodexTurnResult;
+        try {
+            if (sandbox === 'workspaceWrite') {
+                lockHandle = startWorkflowWriterLock({
+                    runId: run.id,
+                    cwd: workflowLockRoot(run),
+                    workCwd: run.git.workCwd || run.cwd,
+                    branch: run.git.branch,
+                    role: 'sdk',
+                    stageId: 'sdk-run',
+                    pid: process.pid,
+                }, workflowLockRoot(run));
+                store.appendEvent(run, 'git.writerLock.created', { role: 'sdk', stageId: 'sdk-run', workCwd: run.git.workCwd || run.cwd, branch: run.git.branch });
+            }
+            result = await runtime.runStandalone!(prompt, {
+                cwd: run.git.workCwd || run.cwd,
+                approvalPolicy: run.approvalPolicy || 'never',
+                sandbox,
+            });
+        } finally {
+            if (lockHandle) {
+                lockHandle.stop();
+                store.appendEvent(run, 'git.writerLock.released', { role: 'sdk', stageId: 'sdk-run' });
+            }
+        }
         const failed = result.status === 'failed' || !!result.error;
         store.upsertStage(run, {
             id: 'sdk-run',
@@ -710,20 +762,20 @@ export class CodexWorkflowController {
                     runId: run.id,
                     type: 'commit',
                     status: 'pending',
-                    summary: `Commit ${changedFiles.length} changed file(s) from SDK workflow run.`,
+                    summary: `SDK 워크플로우 작업의 변경 파일 ${changedFiles.length}개를 커밋합니다.`,
                     diff: gitSafe(['diff', '--stat'], run.git.workCwd) || result.diff,
                     validationHash: diffHash,
                     createdAt: new Date().toISOString(),
                 });
                 run.status = 'pendingCommitApproval';
                 store.saveRun(run);
-                this.emitState('SDK workflow completed with file changes. Commit approval is required.');
+                this.emitState('SDK 워크플로우가 파일 변경과 함께 완료되었습니다. 커밋 승인이 필요합니다.');
                 return;
             }
         }
         run.status = failed ? 'failed' : 'completed';
         store.saveRun(run);
-        this.emitState(failed ? 'SDK workflow failed.' : 'SDK workflow completed.');
+        this.emitState(failed ? 'SDK 워크플로우 실패.' : 'SDK 워크플로우 완료.');
     }
 
     private async ensureRuntime(run: WorkflowRun, cwd: string): Promise<CodexRuntimeAdapter> {
@@ -759,10 +811,66 @@ export class CodexWorkflowController {
         const auth = await runtime.accountRead();
         if (auth?.requiresOpenaiAuth && !auth?.account) {
             run.status = 'blocked';
-            run.artifacts.finalSummary = 'Codex login is required. Run Codex login in the Codex app/CLI, then resume this workflow.';
+            run.artifacts.finalSummary = 'Codex 로그인이 필요합니다. Codex 앱/CLI에서 로그인한 뒤 이 워크플로우를 재개하세요.';
             store.saveRun(run);
             throw new Error(run.artifacts.finalSummary);
         }
+    }
+
+    private async ensureProjectDocumentCache(store: CodexWorkflowStore, run: WorkflowRun, runtime: CodexRuntimeAdapter): Promise<void> {
+        const roles = plannedRolesForRun(run).filter(role => CODEX_WORKFLOW_ROLES.includes(role as CodexWorkflowRole));
+        if (roles.length === 0) return;
+        try {
+            store.appendEvent(run, 'documents.cache.started', { roles });
+            await rebuildDocumentCache(run.cwd, (prompt, purpose) => this.runDocsAgentText(runtime, run, prompt, purpose), roles);
+            store.appendEvent(run, 'documents.cache.completed', { roles });
+        } catch (e: any) {
+            const message = e?.message || String(e);
+            store.appendEvent(run, 'documents.cache.failed', { error: message });
+            this.emitLog(`document cache skipped: ${message}`);
+            if (blocksOnDocumentCache(run)) {
+                run.status = 'blocked';
+                run.artifacts.finalSummary = `프로젝트 문서 요약 캐시 생성 실패로 code-changing run을 차단했습니다.\n${message}`;
+                store.saveRun(run);
+                throw new Error(run.artifacts.finalSummary);
+            }
+        }
+    }
+
+    private async runDocsAgentText(runtime: CodexRuntimeAdapter, run: WorkflowRun, prompt: string, purpose: string): Promise<string> {
+        const rolePrompt = this.withRole('docs-agent', `${prompt}\n\nPurpose: ${purpose}`);
+        const cwd = run.git.workCwd || run.cwd;
+        const timeoutMs = 20 * 60 * 1000;
+        if (runtime.runStandalone) {
+            const result = await runtime.runStandalone(rolePrompt, {
+                cwd,
+                approvalPolicy: 'never',
+                sandbox: 'readOnly',
+                ...(this.codexModel ? { model: this.codexModel } : {}),
+            }, timeoutMs);
+            if (result.status === 'failed' || result.error) throw new Error(result.error || 'docs-agent cache summary failed.');
+            return result.text || '';
+        }
+        const thread = await runtime.startThread({
+            cwd,
+            approvalPolicy: 'never',
+            sandbox: 'read-only',
+            serviceName: 'haram_ai_agent_doc_cache',
+            ...(this.codexModel ? { model: this.codexModel } : {}),
+        });
+        const threadId = thread?.thread?.id;
+        if (!threadId) throw new Error('Failed to start docs-agent cache thread.');
+        const result = await runtime.runTurn({
+            threadId,
+            cwd,
+            approvalPolicy: 'never',
+            sandboxPolicy: sandboxPolicy('readOnly', cwd),
+            settings: { developer_instructions: this.readRoleInstructions('docs-agent') },
+            ...(this.codexModel ? { model: this.codexModel } : {}),
+            input: [{ type: 'text', text: rolePrompt }],
+        }, timeoutMs);
+        if (result.status === 'failed' || result.error) throw new Error(result.error || 'docs-agent cache summary failed.');
+        return result.text || '';
     }
 
     private async runStage(store: CodexWorkflowStore, run: WorkflowRun, stageId: string, role: CodexWorkflowRole, sandbox: SandboxKind, prompt: string): Promise<CodexTurnResult> {
@@ -771,10 +879,28 @@ export class CodexWorkflowController {
         store.updateAgent(run, role, { status: 'running', lastError: undefined });
         this.emitState(`${role} running: ${stageId}`);
 
+        let lockHandle: WorkflowWriterLockHandle | undefined;
         try {
             const threadId = await this.prepareThread(run, role, sandbox);
             const runtime = await this.ensureRuntime(run, run.git.workCwd || run.cwd);
             const roleInstructions = this.readRoleInstructions(role);
+            if (sandbox === 'workspaceWrite') {
+                lockHandle = startWorkflowWriterLock({
+                    runId: run.id,
+                    cwd: workflowLockRoot(run),
+                    workCwd: run.git.workCwd || run.cwd,
+                    branch: run.git.branch,
+                    role,
+                    stageId,
+                    pid: process.pid,
+                }, workflowLockRoot(run));
+                store.appendEvent(run, 'git.writerLock.created', {
+                    role,
+                    stageId,
+                    workCwd: run.git.workCwd || run.cwd,
+                    branch: run.git.branch,
+                });
+            }
             const result = await runtime.runTurn({
                 threadId,
                 input: [{ type: 'text', text: prompt }],
@@ -812,6 +938,11 @@ export class CodexWorkflowController {
             store.updateAgent(run, role, { status: 'failed', lastError: e?.message || String(e) });
             this.emitState(`${role} failed: ${e?.message || e}`);
             throw e;
+        } finally {
+            if (lockHandle) {
+                lockHandle.stop();
+                store.appendEvent(run, 'git.writerLock.released', { role, stageId });
+            }
         }
     }
 
@@ -847,36 +978,192 @@ export class CodexWorkflowController {
         return threadId;
     }
 
-    private prepareGit(store: CodexWorkflowStore, run: WorkflowRun): void {
+    private async prepareGit(store: CodexWorkflowStore, run: WorkflowRun): Promise<void> {
         const cwd = run.cwd;
         const isRepo = gitSafe(['rev-parse', '--show-toplevel'], cwd) !== null;
         run.git.isRepo = isRepo;
         run.git.originalCwd = cwd;
         run.git.workCwd = cwd;
+        run.git.routingDecision = 'none';
         if (!isRepo) {
             store.saveRun(run);
             return;
         }
 
         const originalBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).trim();
-        const dirty = gitLines(['status', '--porcelain'], cwd).length > 0;
-        const branch = `codex/${slugify(run.userPrompt)}-${timestampForBranch()}`;
+        const branchType = workflowBranchType(run);
+        const branchScope = workflowBranchScope(run);
+        const branch = workflowBranchName(run);
         run.git.originalBranch = originalBranch;
         run.git.branch = branch;
-        run.git.dirty = dirty;
+        run.git.branchType = branchType;
+        run.git.branchScope = branchScope;
+        run.git.routingPreference = run.git.routingPreference || 'auto';
 
-        if (dirty || this.options.alwaysUseWorktree) {
-            const parent = path.dirname(cwd);
-            const base = path.basename(cwd);
-            const worktreePath = path.join(parent, `${base}-${branch.replace(/[\\/]/g, '-')}`);
-            git(['worktree', 'add', '-b', branch, worktreePath, 'HEAD'], cwd, 120000);
+        if (scopeNeedsConfirmation(branchScope)) {
+            this.blockGitRouting(store, run, `브랜치 scope가 너무 일반적입니다: ${branchScope}. 기능/도메인/소유 경계를 드러내는 짧은 kebab-case scope로 사용자 확인이 필요합니다.`);
+            throw new Error(run.git.routingBlockedReason);
+        }
+
+        const preflight = await runGitRoutingPreflight(cwd, {
+            branch,
+            branchType,
+            branchScope,
+            workCwd: run.git.workCwd || cwd,
+            currentRunId: run.id,
+        });
+        const statusLines = preflight.statusPorcelain;
+        const dirty = preflight.dirtyPaths.length > 0;
+        run.git.dirty = dirty;
+        run.git.changedFiles = preflight.dirtyPaths;
+        run.git.laneVerdict = preflight.laneVerdict;
+        run.git.activeLocks = preflight.activeLocks;
+        run.git.staleLocks = preflight.staleLocks;
+        run.git.diffStability = preflight.diffStability;
+        run.git.preflightSummary = preflight.summary;
+        run.git.preflightWarnings = preflight.warnings;
+        if (preflight.blockedReason) {
+            this.blockGitRouting(store, run, preflight.blockedReason);
+            throw new Error(run.git.routingBlockedReason);
+        }
+
+        const worktrees = parseWorktrees(preflight.worktreePorcelain);
+        store.appendEvent(run, 'git.routing.inspected', {
+            branch,
+            branchType,
+            branchScope,
+            status: statusLines,
+            diffNameStatus: preflight.diffNameStatus,
+            cachedDiffNameStatus: preflight.cachedDiffNameStatus,
+            laneVerdict: preflight.laneVerdict,
+            diffStability: preflight.diffStability,
+            activeLocks: preflight.activeLocks.length,
+            staleLocks: preflight.staleLocks.length,
+            warnings: preflight.warnings,
+            worktrees: worktrees.map(w => ({ path: w.path, branch: w.branch })),
+        });
+
+        const existingBranch = branchExists(cwd, branch);
+        const existingWorktree = worktrees.find(w => w.branch === branch);
+        const baseRef = routingBaseRef(cwd, originalBranch);
+        const uniqueCommits = existingBranch ? uniqueCommitCount(cwd, baseRef, branch) : 0;
+        const worktreePath = codexWorktreePath(cwd, branchType, branchScope);
+        const forceWorktree = run.git.routingPreference === 'force-worktree' || this.options.alwaysUseWorktree;
+        const hasActiveWriterLock = preflight.activeLocks.length > 0;
+
+        if (existingWorktree) {
+            const activeLockOnWorktree = preflight.activeLocks.some(lock => path.resolve(lock.workCwd || '').toLowerCase() === path.resolve(existingWorktree.path).toLowerCase());
+            if (activeLockOnWorktree) {
+                this.blockGitRouting(store, run, `${branch} worktree 재사용 차단: 해당 worktree에 active writer lock이 있습니다. 사용자 확인이 필요합니다.`);
+                throw new Error(run.git.routingBlockedReason);
+            }
+            const clean = gitLines(['status', '--porcelain'], existingWorktree.path).length === 0;
+            run.git.reuseCandidate = { branch, worktreePath: existingWorktree.path, clean, uniqueCommits };
+            if (!clean || uniqueCommits > 0) {
+                const reason = `${branch} worktree 재사용 차단: ${!clean ? 'worktree가 dirty 상태입니다' : `base branch에 없는 unique commit ${uniqueCommits}개가 있습니다`}. 자동 suffix는 만들지 않으며 사용자 확인이 필요합니다.`;
+                this.blockGitRouting(store, run, reason);
+                throw new Error(run.git.routingBlockedReason);
+            }
+            run.git.routingDecision = 'reuse-worktree';
+            run.git.worktreePath = existingWorktree.path;
+            run.git.workCwd = existingWorktree.path;
+            store.saveRun(run);
+            return;
+        }
+
+        if (existingBranch) {
+            run.git.reuseCandidate = { branch, clean: true, uniqueCommits };
+            if (uniqueCommits > 0) {
+                this.blockGitRouting(store, run, `${branch} branch 재사용 차단: base branch에 없는 unique commit ${uniqueCommits}개가 있습니다. 자동 suffix는 만들지 않으며 사용자 확인이 필요합니다.`);
+                throw new Error(run.git.routingBlockedReason);
+            }
+            const targetIsCurrentBranch = originalBranch === branch;
+            const canReuseCurrentBranch = targetIsCurrentBranch && !forceWorktree && !hasActiveWriterLock && (!dirty || preflight.laneVerdict === 'same-lane');
+            if (canReuseCurrentBranch) {
+                run.git.routingDecision = 'reuse-branch';
+                run.git.workCwd = cwd;
+                store.saveRun(run);
+                return;
+            }
+            if (targetIsCurrentBranch) {
+                const reason = `${branch} branch는 현재 작업트리에 checkout되어 있지만 현재 트리 사용이 안전하다고 증명되지 않았습니다. 자동 suffix 없이 사용자 확인이 필요합니다.`;
+                this.blockGitRouting(store, run, reason);
+                throw new Error(run.git.routingBlockedReason);
+            }
+            await this.addExistingBranchWorktree(store, run, branch, worktreePath);
+            return;
+        }
+
+        const canUseCurrentTree = !forceWorktree && !hasActiveWriterLock && (!dirty || preflight.laneVerdict === 'same-lane');
+        if (!canUseCurrentTree) {
+            if (fs.existsSync(worktreePath)) {
+                this.blockGitRouting(store, run, `worktree 경로가 이미 존재합니다: ${worktreePath}. 자동 suffix는 만들지 않으며 사용자 확인이 필요합니다.`);
+                throw new Error(run.git.routingBlockedReason);
+            }
+            await this.withGitRoutingMutex(store, run, () => {
+                fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+                git(['worktree', 'add', '-b', branch, worktreePath, baseRef], cwd, 120000);
+            });
+            run.git.routingDecision = 'new-worktree';
             run.git.worktreePath = worktreePath;
             run.git.workCwd = worktreePath;
         } else {
-            git(['switch', '-c', branch], cwd, 60000);
+            await this.withGitRoutingMutex(store, run, () => {
+                git(['switch', '-c', branch], cwd, 60000);
+            });
+            run.git.routingDecision = 'current-branch';
             run.git.workCwd = cwd;
         }
         store.saveRun(run);
+    }
+
+    private async addExistingBranchWorktree(store: CodexWorkflowStore, run: WorkflowRun, branch: string, worktreePath: string): Promise<void> {
+        if (fs.existsSync(worktreePath)) {
+            this.blockGitRouting(store, run, `worktree 경로가 이미 존재합니다: ${worktreePath}. 자동 suffix는 만들지 않으며 사용자 확인이 필요합니다.`);
+            throw new Error(run.git.routingBlockedReason);
+        }
+        await this.withGitRoutingMutex(store, run, () => {
+            fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+            git(['worktree', 'add', worktreePath, branch], run.cwd, 120000);
+        });
+        run.git.routingDecision = 'reuse-branch';
+        run.git.worktreePath = worktreePath;
+        run.git.workCwd = worktreePath;
+        store.saveRun(run);
+    }
+
+    private async withGitRoutingMutex(store: CodexWorkflowStore, run: WorkflowRun, action: () => void): Promise<void> {
+        const lockRoot = workflowLockRoot(run);
+        let handle: GitRoutingMutexHandle | undefined;
+        try {
+            handle = await acquireGitRoutingMutex(lockRoot, run.id, 5000);
+        } catch (e: any) {
+            const reason = e?.message || String(e);
+            run.git.routingLock = { active: true, ownerRunId: run.id, reason };
+            this.blockGitRouting(store, run, reason);
+            throw new Error(run.git.routingBlockedReason);
+        }
+        run.git.routingLock = { active: true, ownerRunId: handle.lock.runId, updatedAt: handle.lock.updatedAt };
+        store.saveRun(run);
+        store.appendEvent(run, 'git.routing.lock.acquired', { runId: run.id, cwd: lockRoot });
+        try {
+            action();
+        } finally {
+            handle.release();
+            run.git.routingLock = { active: false, ownerRunId: run.id, updatedAt: new Date().toISOString() };
+            store.saveRun(run);
+            store.appendEvent(run, 'git.routing.lock.released', { runId: run.id, cwd: lockRoot });
+        }
+    }
+
+    private blockGitRouting(store: CodexWorkflowStore, run: WorkflowRun, reason: string): void {
+        run.git.routingDecision = 'blocked';
+        run.git.routingBlockedReason = reason;
+        run.git.lastError = reason;
+        run.status = 'blocked';
+        run.artifacts.finalSummary = reason;
+        store.saveRun(run);
+        store.appendEvent(run, 'git.routing.blocked', { reason, branch: run.git.branch });
     }
 
     private async processAgentRequests(
@@ -952,11 +1239,11 @@ export class CodexWorkflowController {
     }
 
     private implementationPrompt(run: WorkflowRun, role: CodexWorkflowRole): string {
-        return this.withRole(role, `${implementationMission(role)}\n\nUser request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nWeb research summary:\n${run.artifacts.webResearchSummary || ''}\n\nGit plan:\n${run.artifacts.gitPlan || ''}\n\nDo not commit or push. Keep edits scoped to your role. If another specialist should answer a question before you continue, include an AGENT_REQUESTS JSON block like [{"toRole":"docs-agent","question":"..."}]. After your work, summarize changed files, behavior changes, and commands run.`);
+        return this.withRole(role, `${implementationMission(role)}\n\nUser request:\n${run.userPrompt}\n\nDocs summary:\n${run.artifacts.docsSummary || ''}\n\nWeb research summary:\n${run.artifacts.webResearchSummary || ''}\n\nGit plan:\n${run.artifacts.gitPlan || ''}\n\nDo not commit or push. Keep edits scoped to your role. If another specialist should answer a question before you continue, include an AGENT_REQUESTS JSON block like [{"toRole":"docs-agent","question":"..."}]. After your work, summarize changed files, behavior changes, and commands run in Korean.`);
     }
 
     private repairPrompt(run: WorkflowRun, role: CodexWorkflowRole, qa: CodexTurnResult): string {
-        return this.withRole(role, `Repair the implementation area owned by ${role} based on QA feedback.\n\nUser request:\n${run.userPrompt}\n\nQA feedback:\n${qa.text || qa.error || ''}\n\nCurrent implementation summaries:\n${implementationSummaryBlock(run)}\n\nDo not commit or push. Keep the fix scoped to your role and summarize changed files.`);
+        return this.withRole(role, `Repair the implementation area owned by ${role} based on QA feedback.\n\nUser request:\n${run.userPrompt}\n\nQA feedback:\n${qa.text || qa.error || ''}\n\nCurrent implementation summaries:\n${implementationSummaryBlock(run)}\n\nDo not commit or push. Keep the fix scoped to your role and summarize changed files in Korean.`);
     }
 
     private agentRequestPrompt(run: WorkflowRun, fromRole: CodexWorkflowRole, question: string): string {
@@ -964,7 +1251,7 @@ export class CodexWorkflowController {
     }
 
     private agentRequestFollowupPrompt(run: WorkflowRun, role: CodexWorkflowRole, answers: string): string {
-        return this.withRole(role, `Continue your assigned work using these agent handoff answers.\n\nUser request:\n${run.userPrompt}\n\nAgent answers:\n${answers}\n\nApply any needed scoped changes for ${role}. Do not commit or push. Summarize changed files.`);
+        return this.withRole(role, `Continue your assigned work using these agent handoff answers.\n\nUser request:\n${run.userPrompt}\n\nAgent answers:\n${answers}\n\nApply any needed scoped changes for ${role}. Do not commit or push. Summarize changed files in Korean.`);
     }
 
     private qaPrompt(run: WorkflowRun): string {
@@ -976,7 +1263,17 @@ export class CodexWorkflowController {
     }
 
     private withRole(role: CodexWorkflowRole, body: string): string {
-        return `[Codex custom agent role: ${role}]\n${this.readRoleInstructions(role)}\n\n${body}`;
+        const documentContext = this.currentRun ? this.projectDocumentContext(this.currentRun, role) : '';
+        return `[Codex custom agent role: ${role}]\n${this.readRoleInstructions(role)}\n\n${body}${documentContext ? `\n\n${documentContext}` : ''}`;
+    }
+
+    private projectDocumentContext(run: WorkflowRun, role: CodexWorkflowRole): string {
+        try {
+            return agentDocumentContext(run.cwd, role);
+        } catch (e: any) {
+            this.emitLog(`document context unavailable for ${role}: ${e?.message || e}`);
+            return '';
+        }
     }
 
     private readRoleInstructions(role: CodexWorkflowRole): string {
@@ -1039,6 +1336,10 @@ function sandboxPolicy(kind: SandboxKind, cwd: string, networkAccess = false): a
         return { type: 'readOnly', networkAccess };
     }
     return { type: 'workspaceWrite', writableRoots: [cwd], networkAccess, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+}
+
+function workflowLockRoot(run: WorkflowRun): string {
+    return gitRepositoryLockRoot(run.git.originalCwd || run.cwd);
 }
 
 function webResearchConfig(): any {
@@ -1116,6 +1417,10 @@ export function plannedRolesForRun(run: WorkflowRun): string[] {
     return assignedRolesForRun(run, needsResearch, selectImplementationRoles(run));
 }
 
+function blocksOnDocumentCache(run: WorkflowRun): boolean {
+    return run.runKind !== 'readOnly' && run.runKind !== 'automation';
+}
+
 function implementationStageId(role: CodexWorkflowRole): string {
     if (role === 'designer') return 'design';
     if (role === 'frontend-coder') return 'frontend-code';
@@ -1165,10 +1470,117 @@ function summarize(text: string, max = 2000): string {
     return clean.length > max ? `${clean.slice(0, max)}\n...[truncated]` : clean;
 }
 
-function timestampForBranch(): string {
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+function workflowBranchName(run: WorkflowRun): string {
+    return `codex/${workflowBranchType(run)}/${workflowBranchScope(run)}`;
+}
+
+function workflowBranchScope(run: WorkflowRun): string {
+    return inferBranchScope(run.userPrompt || run.prompt || '');
+}
+
+function workflowBranchType(run: WorkflowRun): string {
+    if (run.runKind === 'gitOperation') return 'chore';
+    const text = `${run.runKind || ''}\n${run.userPrompt || run.prompt || ''}`.toLowerCase();
+    if (/(docs?|document|readme|guide|changelog|process|rule|rules|문서|가이드|규칙|프로세스)/i.test(text) && !/(code|implement|기능|구현)/i.test(text)) return 'docs';
+    if (/(test|fixture|qa\s*harness|harness|spec|테스트|fixture)/i.test(text)) return 'test';
+    if (/(research|analy[sz]e|investigate|official|external|data collection|조사|분석|연구|공식|외부|수집)/i.test(text)) return 'research';
+    if (/(spike|experiment|prototype|proof|검증\s*실험|방향\s*검증|임시\s*실험|실험)/i.test(text)) return 'spike';
+    if (/(deploy|runtime|operation|ops|backfill|collector|script|배포|런타임|운영|수집|백필|스크립트)/i.test(text)) return 'ops';
+    if (/(setup|install|diagnostic|cleanup|metadata|chore|설치|진단|정리|메타)/i.test(text) || (/(config|설정)/i.test(text) && !/(feature|기능|추가|검색|search)/i.test(text))) return 'chore';
+    if (/(refactor|restructure|structure|cleanup code|동작\s*유지|구조\s*개선|리팩터|리팩토)/i.test(text)) return 'refactor';
+    if (/(fix|bug|regression|error|crash|fail|repair|hotfix|버그|회귀|오류|에러|실패|고장|해결)/i.test(text)) return 'fix';
+    return 'feat';
+}
+
+function inferBranchScope(prompt: string): string {
+    const text = prompt.toLowerCase();
+    const patterns: Array<[RegExp, string]> = [
+        [/bge[-_\s]?m3/i, 'bge-m3'],
+        [/(setting|settings|설정).*(search|검색)|(search|검색).*(setting|settings|설정)/i, 'setting-search'],
+        [/(homework|숙제)/i, 'homework'],
+        [/(orchestrator|orchestration|오케스트레이터)/i, 'orchestrator'],
+        [/(combat|전투).*(power|력)|(power|력).*(combat|전투)/i, 'combat-power'],
+        [/(frontend|front-end|front\s*end|프론트)/i, 'frontend'],
+        [/(backend|back-end|back\s*end|백엔드)/i, 'backend'],
+        [/(deploy|deployment|배포)/i, 'deploy'],
+        [/(workflow|워크플로우)/i, 'workflow'],
+        [/(document|docs|문서)/i, 'docs'],
+        [/(git|깃|커밋|푸시|브랜치|워크트리)/i, 'repo'],
+        [/(setup|install|config|설치|설정|정리)/i, 'repo'],
+    ];
+    for (const [pattern, scope] of patterns) {
+        if (pattern.test(text)) return scope;
+    }
+    const ascii = text
+        .replace(/[^a-z0-9\s_-]+/g, ' ')
+        .split(/[\s_-]+/)
+        .map(token => token.trim())
+        .filter(Boolean)
+        .filter(token => !BRANCH_SCOPE_STOPWORDS.has(token))
+        .slice(0, 3)
+        .join('-');
+    return safeBranchScope(ascii || 'task');
+}
+
+function safeBranchScope(value: string): string {
+    return value
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'task';
+}
+
+function scopeNeedsConfirmation(scope: string): boolean {
+    return !scope || ['task', 'temp', 'wip', 'misc', 'update', 'fixes', 'work', 'test2'].includes(scope) || /^\d+$/.test(scope) || /\d{8}/.test(scope);
+}
+
+const BRANCH_SCOPE_STOPWORDS = new Set([
+    'add', 'change', 'update', 'fix', 'repair', 'implement', 'create', 'build', 'make', 'work',
+    'task', 'temp', 'wip', 'misc', 'test', 'tests', 'feature', 'bug', 'issue', 'code', 'run',
+    'codex', 'workflow', 'app', 'please', 'the', 'and', 'for', 'with', 'to', 'of',
+]);
+
+interface GitWorktreeInfo {
+    path: string;
+    branch?: string;
+}
+
+function parseWorktrees(output: string): GitWorktreeInfo[] {
+    const worktrees: GitWorktreeInfo[] = [];
+    let current: GitWorktreeInfo | null = null;
+    for (const line of output.split(/\r?\n/)) {
+        if (line.startsWith('worktree ')) {
+            if (current) worktrees.push(current);
+            current = { path: line.slice('worktree '.length).trim() };
+        } else if (current && line.startsWith('branch ')) {
+            current.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '').trim();
+        }
+    }
+    if (current) worktrees.push(current);
+    return worktrees;
+}
+
+function branchExists(cwd: string, branch: string): boolean {
+    return gitSafe(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], cwd) !== null;
+}
+
+function routingBaseRef(cwd: string, originalBranch: string): string {
+    if (gitSafe(['rev-parse', '--verify', 'master'], cwd)) return 'master';
+    if (gitSafe(['rev-parse', '--verify', 'main'], cwd)) return 'main';
+    return originalBranch || 'HEAD';
+}
+
+function uniqueCommitCount(cwd: string, baseRef: string, branch: string): number {
+    const raw = gitSafe(['rev-list', '--count', `${baseRef}..${branch}`], cwd);
+    const count = Number((raw || '').trim());
+    return Number.isFinite(count) ? count : 0;
+}
+
+function codexWorktreePath(cwd: string, branchType: string, branchScope: string): string {
+    const parent = path.dirname(cwd);
+    const base = path.basename(cwd);
+    return path.join(parent, `${base}-worktrees`, `${branchType}-${branchScope}`);
 }
 
 function git(args: string[], cwd: string, timeout = 30000): string {
@@ -1265,7 +1677,8 @@ function hasRemote(cwd: string): boolean {
 function gitDiffHash(cwd: string): string {
     const status = gitSafe(['status', '--porcelain'], cwd) || '';
     const diff = gitSafe(['diff', '--binary'], cwd) || '';
-    return crypto.createHash('sha256').update(`${status}\n${diff}`).digest('hex');
+    const staged = gitSafe(['diff', '--cached', '--binary'], cwd) || '';
+    return crypto.createHash('sha256').update(`${status}\n${diff}\n${staged}`).digest('hex');
 }
 
 function gitOperationDiff(cwd: string): string {

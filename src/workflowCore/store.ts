@@ -38,6 +38,31 @@ export interface WorkflowGitState {
     workCwd: string;
     originalBranch?: string;
     branch?: string;
+    branchType?: string;
+    branchScope?: string;
+    routingDecision?: 'none' | 'current-branch' | 'new-worktree' | 'reuse-branch' | 'reuse-worktree' | 'blocked';
+    reuseCandidate?: {
+        branch?: string;
+        worktreePath?: string;
+        reason?: string;
+        clean?: boolean;
+        uniqueCommits?: number;
+    };
+    routingBlockedReason?: string;
+    routingPreference?: 'auto' | 'force-worktree';
+    routingLock?: {
+        active: boolean;
+        stale?: boolean;
+        ownerRunId?: string;
+        updatedAt?: string;
+        reason?: string;
+    };
+    laneVerdict?: 'clean' | 'same-lane' | 'unrelated' | 'unknown';
+    activeLocks?: WorkflowWriterLock[];
+    staleLocks?: WorkflowWriterLock[];
+    diffStability?: 'stable' | 'changed' | 'unavailable';
+    preflightSummary?: string;
+    preflightWarnings?: string[];
     worktreePath?: string;
     dirty?: boolean;
     changedFiles?: string[];
@@ -48,6 +73,20 @@ export interface WorkflowGitState {
     diffHash?: string;
     mergeStatus?: 'idle' | 'pendingApproval' | 'merged' | 'conflict' | 'failed' | 'cleaned';
     lastError?: string;
+}
+
+export interface WorkflowWriterLock {
+    runId: string;
+    cwd: string;
+    workCwd: string;
+    branch?: string;
+    role: string;
+    stageId: string;
+    pid: number;
+    createdAt: string;
+    updatedAt: string;
+    status: 'active' | 'released' | 'stale';
+    staleReason?: string;
 }
 
 export interface WorkflowArtifacts {
@@ -190,6 +229,7 @@ export class CodexWorkflowStore {
             runKind?: WorkflowRunKind;
             approvalPolicy?: string;
             mcpSource?: string;
+            routingPreference?: 'auto' | 'force-worktree';
         } = {},
     ): WorkflowRun {
         this.ensure();
@@ -222,6 +262,7 @@ export class CodexWorkflowStore {
                 isRepo: false,
                 originalCwd: this.cwd,
                 workCwd: this.cwd,
+                routingPreference: options.routingPreference || 'auto',
             },
             artifacts: {},
             approvals: {

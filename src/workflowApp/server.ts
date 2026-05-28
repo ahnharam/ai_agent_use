@@ -21,8 +21,23 @@ import {
     WorkflowRun,
     WorkflowRunKind,
 } from '../workflowCore/store';
-import { isSdkRuntimeAvailable } from '../workflowCore/runtimeAdapter';
+import { createRuntimeAdapter, isSdkRuntimeAvailable } from '../workflowCore/runtimeAdapter';
 import { probeCodexExecutable, resolveCodexExecutable } from '../workflowCore/codexAppServerClient';
+import {
+    documentProfilePath,
+    readDocumentCacheState,
+    readDocumentProfile,
+    rebuildDocumentCache,
+    recommendDocumentProfile,
+    saveDocumentProfile,
+    scanProjectDocuments,
+} from '../workflowCore/documentContext';
+import {
+    readWorkflowWriterLocks,
+    readGitRoutingMutex,
+    gitRepositoryLockRoot,
+    workflowLocksDir,
+} from '../workflowCore/gitRoutingSafety';
 import { workflowAppHtml } from './ui';
 
 export interface WorkflowAppServerOptions {
@@ -91,7 +106,7 @@ interface WorkflowRunSummary {
     assignedRolesPreview: string[];
     stages: Array<Pick<StageState, 'id' | 'role' | 'status' | 'outputSummary' | 'error'>>;
     agents: Record<string, Pick<AgentState, 'role' | 'status' | 'threadId'>>;
-    git: Pick<WorkflowGitState, 'isRepo' | 'originalCwd' | 'workCwd' | 'branch' | 'worktreePath' | 'dirty' | 'changedFiles' | 'conflictFiles' | 'commitHash' | 'pushRemote' | 'pushBranch' | 'diffHash' | 'mergeStatus' | 'lastError'>;
+    git: Pick<WorkflowGitState, 'isRepo' | 'originalCwd' | 'workCwd' | 'branch' | 'branchType' | 'branchScope' | 'routingDecision' | 'reuseCandidate' | 'routingBlockedReason' | 'routingPreference' | 'routingLock' | 'laneVerdict' | 'activeLocks' | 'staleLocks' | 'diffStability' | 'preflightSummary' | 'preflightWarnings' | 'worktreePath' | 'dirty' | 'changedFiles' | 'conflictFiles' | 'commitHash' | 'pushRemote' | 'pushBranch' | 'diffHash' | 'mergeStatus' | 'lastError'>;
     artifacts: Pick<WorkflowRun['artifacts'], 'assignedRoles' | 'finalSummary'>;
 }
 
@@ -102,7 +117,6 @@ export class WorkflowAppServer {
     private active = new Set<string>();
     private waiting = new Set<string>();
     private queue: QueuedRun[] = [];
-    private repoWriteLocks = new Map<string, string>();
     private registryPath: string;
     private registry: RegistryEntry[] = [];
     private host: string;
@@ -175,6 +189,37 @@ export class WorkflowAppServer {
             }
             if (method === 'GET' && url.pathname === '/api/diagnostics') {
                 return this.json(res, this.buildDiagnostics(req, url));
+            }
+            const docsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/docs(?:\/(.+))?$/);
+            if (docsMatch) {
+                const cwd = path.resolve(decodeURIComponent(docsMatch[1]));
+                const action = docsMatch[2] || '';
+                if (method === 'GET' && action === 'profile') {
+                    return this.json(res, { path: documentProfilePath(cwd), profile: readDocumentProfile(cwd) });
+                }
+                if (method === 'POST' && action === 'profile') {
+                    const body = await readJson(req);
+                    const profile = saveDocumentProfile(cwd, body.profile || body);
+                    return this.json(res, { path: documentProfilePath(cwd), profile });
+                }
+                if (method === 'POST' && action === 'scan') {
+                    const body = await readJson(req);
+                    const profile = body.profile || readDocumentProfile(cwd);
+                    return this.json(res, { path: documentProfilePath(cwd), profile, scanned: scanProjectDocuments(cwd, profile) });
+                }
+                if (method === 'POST' && action === 'recommend') {
+                    const result = await recommendDocumentProfile(cwd, (prompt, purpose) => this.runDocsAgentText(cwd, prompt, purpose));
+                    return this.json(res, result);
+                }
+                if (method === 'POST' && action === 'cache/rebuild') {
+                    const body = await readJson(req);
+                    const roles = Array.isArray(body.roles) ? body.roles.map((role: any) => String(role)) : undefined;
+                    const state = await rebuildDocumentCache(cwd, (prompt, purpose) => this.runDocsAgentText(cwd, prompt, purpose), roles);
+                    return this.json(res, state);
+                }
+                if (method === 'GET' && action === 'cache') {
+                    return this.json(res, readDocumentCacheState(cwd));
+                }
             }
             if (method === 'GET' && url.pathname === '/api/runs') {
                 const status = url.searchParams.get('status') || '';
@@ -275,9 +320,10 @@ export class WorkflowAppServer {
         const approvalPolicy = typeof body?.approvalPolicy === 'string' ? body.approvalPolicy : undefined;
         const source = body?.source || 'codex-desktop';
         const mcpSource = body?.mcpSource || (source === 'codex-desktop' ? 'codex-workflow-mcp' : undefined);
+        const routingPreference = this.routingPreferenceFor(cwd, runKind);
         if (!this.canStartRun(cwd, runKind)) {
             const store = new CodexWorkflowStore(cwd);
-            const run = store.createRun(prompt, contextMode, 2, { source, priority, runtime, runKind, approvalPolicy, mcpSource });
+            const run = store.createRun(prompt, contextMode, 2, { source, priority, runtime, runKind, approvalPolicy, mcpSource, routingPreference });
             run.status = 'queued';
             store.saveRun(run);
             this.enqueue({ id: run.id, cwd, contextMode, priority, runKind });
@@ -286,7 +332,7 @@ export class WorkflowAppServer {
             return run;
         }
         const controller = this.controllerFor(cwd);
-        const run = controller.startDetached(prompt, contextMode, { source, priority, runtime, runKind, approvalPolicy, mcpSource });
+        const run = controller.startDetached(prompt, contextMode, { source, priority, runtime, runKind, approvalPolicy, mcpSource, routingPreference });
         this.controllers.set(run.id, controller);
         this.markActive(run);
         this.registerRun(run);
@@ -305,6 +351,8 @@ export class WorkflowAppServer {
         }
         const controller = this.controllerFor(run.cwd, run.id);
         this.waiting.delete(run.id);
+        run.git.routingPreference = this.routingPreferenceFor(run.cwd, run.runKind, run.id);
+        new CodexWorkflowStore(run.cwd).saveRun(run);
         this.markActive(run);
         void controller.resumeRun(run.id, mode);
         this.broadcast('run.updated', run);
@@ -316,7 +364,7 @@ export class WorkflowAppServer {
         const controller = this.controllers.get(run.id);
         if (controller) await controller.cancel();
         run.status = 'cancelled';
-        run.artifacts.finalSummary = 'Workflow cancelled by user.';
+        run.artifacts.finalSummary = '사용자가 워크플로우를 취소했습니다.';
         new CodexWorkflowStore(run.cwd).saveRun(run);
         this.releaseRun(run.id);
         this.broadcast('run.updated', run);
@@ -343,10 +391,10 @@ export class WorkflowAppServer {
         approval.resolvedAt = new Date().toISOString();
         if (approval.type === 'push') {
             run.status = 'completed';
-            run.artifacts.finalSummary = `${run.artifacts.finalSummary || ''}\nPush rejected by user. Commit was not pushed.`.trim();
+            run.artifacts.finalSummary = `${run.artifacts.finalSummary || ''}\n사용자가 푸시를 거절했습니다. 커밋은 푸시되지 않았습니다.`.trim();
         } else {
             run.status = 'cancelled';
-            run.artifacts.finalSummary = `${approval.type} approval rejected by user.`;
+            run.artifacts.finalSummary = `${approval.type} 승인을 사용자가 거절했습니다.`;
         }
         new CodexWorkflowStore(run.cwd).saveRun(run);
         this.broadcast('approval.resolved', approval);
@@ -363,11 +411,61 @@ export class WorkflowAppServer {
             codexExecutablePath: this.codexExecutablePath,
             defaultContextMode: 'fresh',
             maxRepairLoops: 2,
-            alwaysUseWorktree: true,
+            alwaysUseWorktree: false,
             onUpdate: event => this.onControllerEvent(runId, event),
         });
         if (runId) this.controllers.set(runId, controller);
         return controller;
+    }
+
+    private async runDocsAgentText(cwd: string, prompt: string, purpose: string): Promise<string> {
+        const runtimeKind = isSdkRuntimeAvailable() ? 'sdk' : 'app-server';
+        const executable = resolveCodexExecutable(this.codexExecutablePath);
+        const probe = probeCodexExecutable(executable);
+        if (!probe.ok) throw new Error(`Codex executable is not runnable: ${probe.message}`);
+        const runtime = createRuntimeAdapter(runtimeKind, {
+            executable,
+            cwd,
+            requestTimeoutMs: 20 * 60 * 1000,
+            onStderr: chunk => this.broadcast('log.appended', { message: chunk.trim() }),
+            onEvent: msg => this.broadcast('log.appended', { message: String(msg?.method || msg?.type || 'codex.event') }),
+        });
+        const instructions = readDocsAgentInstructions(this.options.projectRoot);
+        const text = `[Codex custom agent role: docs-agent]\n${instructions}\n\n${prompt}\n\nPurpose: ${purpose}`;
+        try {
+            await runtime.start();
+            const auth = await runtime.accountRead();
+            if (auth?.requiresOpenaiAuth && !auth?.account) throw new Error('Codex login is required before document summaries can be generated.');
+            if (runtime.runStandalone) {
+                const result = await runtime.runStandalone(text, {
+                    cwd,
+                    approvalPolicy: 'never',
+                    sandbox: 'readOnly',
+                }, 20 * 60 * 1000);
+                if (result.status === 'failed' || result.error) throw new Error(result.error || 'docs-agent summary failed.');
+                return result.text || '';
+            }
+            const thread = await runtime.startThread({
+                cwd,
+                approvalPolicy: 'never',
+                sandbox: 'read-only',
+                serviceName: 'haram_ai_agent_doc_cache',
+            });
+            const threadId = thread?.thread?.id;
+            if (!threadId) throw new Error('Failed to start docs-agent document thread.');
+            const result = await runtime.runTurn({
+                threadId,
+                cwd,
+                approvalPolicy: 'never',
+                sandboxPolicy: { type: 'readOnly', networkAccess: false },
+                settings: { developer_instructions: instructions },
+                input: [{ type: 'text', text }],
+            }, 20 * 60 * 1000);
+            if (result.status === 'failed' || result.error) throw new Error(result.error || 'docs-agent summary failed.');
+            return result.text || '';
+        } finally {
+            await runtime.stop().catch(() => undefined);
+        }
     }
 
     private onControllerEvent(runIdHint: string | undefined, event: CodexWorkflowEvent): void {
@@ -468,6 +566,19 @@ export class WorkflowAppServer {
                 originalCwd: run.git.originalCwd,
                 workCwd: run.git.workCwd,
                 branch: run.git.branch,
+                branchType: run.git.branchType,
+                branchScope: run.git.branchScope,
+                routingDecision: run.git.routingDecision,
+                reuseCandidate: run.git.reuseCandidate,
+                routingBlockedReason: run.git.routingBlockedReason,
+                routingPreference: run.git.routingPreference,
+                routingLock: run.git.routingLock,
+                laneVerdict: run.git.laneVerdict,
+                activeLocks: run.git.activeLocks,
+                staleLocks: run.git.staleLocks,
+                diffStability: run.git.diffStability,
+                preflightSummary: run.git.preflightSummary,
+                preflightWarnings: run.git.preflightWarnings,
                 worktreePath: run.git.worktreePath,
                 dirty: run.git.dirty,
                 changedFiles: run.git.changedFiles?.slice(0, 100),
@@ -486,36 +597,41 @@ export class WorkflowAppServer {
         };
     }
 
+    private routingPreferenceFor(cwd: string, runKind: WorkflowRunKind, runId?: string): 'auto' | 'force-worktree' {
+        if (!writeLockKey(cwd, runKind)) return 'auto';
+        return this.hasActiveWriterRunInRepo(cwd, runKind, runId) ? 'force-worktree' : 'auto';
+    }
+
+    private hasActiveWriterRunInRepo(cwd: string, runKind: WorkflowRunKind, runId?: string): boolean {
+        const key = writeLockKey(cwd, runKind);
+        if (!key) return false;
+        for (const activeRunId of this.active) {
+            if (activeRunId === runId) continue;
+            const activeRun = this.readRun(activeRunId);
+            if (!activeRun) continue;
+            const activeKey = writeLockKey(activeRun.cwd, activeRun.runKind);
+            if (activeKey === key) return true;
+        }
+        return false;
+    }
+
     private canStartRun(cwd: string, runKind: WorkflowRunKind, runId?: string): boolean {
         if (this.active.size >= this.maxActiveRuns) return false;
-        const key = writeLockKey(cwd, runKind);
-        if (!key) return true;
-        const owner = this.repoWriteLocks.get(key);
-        return !owner || owner === runId;
+        return true;
     }
 
     private markActive(run: WorkflowRun): void {
         this.active.add(run.id);
-        const key = writeLockKey(run.cwd, run.runKind);
-        if (key) this.repoWriteLocks.set(key, run.id);
     }
 
     private markWaiting(run: WorkflowRun): void {
         this.active.delete(run.id);
-        this.releaseRepoLock(run.id);
         this.waiting.add(run.id);
     }
 
     private releaseRun(runId: string): void {
         this.active.delete(runId);
         this.waiting.delete(runId);
-        this.releaseRepoLock(runId);
-    }
-
-    private releaseRepoLock(runId: string): void {
-        for (const [key, owner] of Array.from(this.repoWriteLocks.entries())) {
-            if (owner === runId) this.repoWriteLocks.delete(key);
-        }
     }
 
     private registerRun(run: WorkflowRun): void {
@@ -637,6 +753,8 @@ export class WorkflowAppServer {
             fs.existsSync(tokenPath) ? 'Token file exists. Value is hidden.' : 'Token file is missing.',
             'Start the Workflow App or run setup to create a local token.'
         ));
+        checks.push(writerLockDirectoryCheck(projectRoot));
+        checks.push(gitRoutingMutexCheck(projectRoot));
         checks.push(check(
             'api-auth',
             'API browser auth',
@@ -759,6 +877,17 @@ export function workflowAppTokenPath(): string {
     return path.join(workflowAppHome(), 'token');
 }
 
+function readDocsAgentInstructions(projectRoot: string): string {
+    const p = path.join(projectRoot, '.codex', 'agents', 'docs-agent.toml');
+    try {
+        const txt = fs.readFileSync(p, 'utf-8');
+        const m = txt.match(/developer_instructions\s*=\s*"""([\s\S]*?)"""/);
+        return m ? m[1].trim() : txt.slice(0, 4000);
+    } catch {
+        return 'Act as docs-agent. Read project documents, extract rules, and answer in Korean without editing files.';
+    }
+}
+
 export function readWorkflowAppConfig(): WorkflowAppConfig {
     const p = workflowAppConfigPath();
     try {
@@ -841,6 +970,44 @@ function appServerCheck(executable: string, codexExecutableOk: boolean): Diagnos
         return check('app-server-probe', 'Codex app-server probe', 'warn', text || `exit ${res.status}`, 'Update Codex Desktop/CLI if multi-agent runtime fails.');
     } catch (e: any) {
         return check('app-server-probe', 'Codex app-server probe', 'fail', e?.message || String(e), 'Update Codex Desktop/CLI or set a working Codex executable path.');
+    }
+}
+
+function writerLockDirectoryCheck(cwd: string): DiagnosticCheck {
+    try {
+        const dir = workflowLocksDir(cwd);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.accessSync(dir, fs.constants.R_OK | fs.constants.W_OK);
+        const locks = readWorkflowWriterLocks(cwd);
+        const staleCount = locks.staleLocks.length;
+        const activeCount = locks.activeLocks.length;
+        const status: DiagnosticCheck['status'] = activeCount > 0 || staleCount > 0 ? 'warn' : 'ok';
+        return check(
+            'workflow-writer-locks',
+            'Workflow writer locks',
+            status,
+            `${dir} accessible. active=${activeCount}, stale=${staleCount}`,
+            'Review active/stale locks before starting branch or worktree operations.'
+        );
+    } catch (e: any) {
+        return check('workflow-writer-locks', 'Workflow writer locks', 'fail', e?.message || String(e), 'Ensure .ai-agent/locks can be created and written in the project root.');
+    }
+}
+
+function gitRoutingMutexCheck(cwd: string): DiagnosticCheck {
+    try {
+        const lock = readGitRoutingMutex(cwd);
+        if (!lock) return check('git-routing-mutex', 'Git routing mutex', 'ok', 'No active git-routing mutex.');
+        const status: DiagnosticCheck['status'] = lock.status === 'active' ? 'warn' : lock.status === 'stale' ? 'warn' : 'ok';
+        return check(
+            'git-routing-mutex',
+            'Git routing mutex',
+            status,
+            `status=${lock.status}, owner=${lock.runId || 'unknown'}, updatedAt=${lock.updatedAt || 'unknown'}${lock.staleReason ? `, reason=${lock.staleReason}` : ''}`,
+            'If the mutex remains active for more than 45 seconds, treat it as stale and retry the routing operation.'
+        );
+    } catch (e: any) {
+        return check('git-routing-mutex', 'Git routing mutex', 'unknown', e?.message || String(e), 'Check .ai-agent/locks/git-routing.json manually.');
     }
 }
 
@@ -935,25 +1102,7 @@ function normalizeRunKind(value: any): WorkflowRunKind {
 
 function writeLockKey(cwd: string, runKind: WorkflowRunKind): string | null {
     if (runKind === 'readOnly' || runKind === 'automation') return null;
-    const root = gitRoot(cwd);
-    return path.resolve(root || cwd).toLowerCase();
-}
-
-function gitRoot(cwd: string): string | null {
-    try {
-        const res = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-            cwd,
-            encoding: 'utf-8',
-            windowsHide: true,
-        });
-        if (res.status === 0) {
-            const root = String(res.stdout || '').trim();
-            if (root) return root;
-        }
-    } catch {
-        // Non-git folders fall back to cwd for write-locking.
-    }
-    return null;
+    return path.resolve(gitRepositoryLockRoot(cwd)).toLowerCase();
 }
 
 function cookieValue(req: http.IncomingMessage, name: string): string {
