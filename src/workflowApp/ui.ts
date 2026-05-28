@@ -14,15 +14,16 @@ export function workflowAppHtml(): string {
     main{display:grid;grid-template-columns:360px 1fr;min-height:calc(100vh - 54px)} aside{border-right:1px solid var(--line);padding:12px;overflow:auto}.content{padding:14px;overflow:auto}
     .newrun{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:12px}.newrun input,.newrun textarea{width:100%;background:#0d1117;border:1px solid var(--line);border-radius:6px;color:var(--text);padding:8px;margin:5px 0}.newrun textarea{height:90px;resize:vertical}
     .run{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--panel);cursor:pointer}.run.active{border-color:var(--accent)}.run .id{font-size:11px;color:var(--muted);word-break:break-all}
-    .status{display:inline-block;border-radius:999px;padding:2px 7px;font-size:11px;background:#30363d;color:var(--text)}.status.running{background:#1f6feb}.status.completed{background:#238636}.status.failed,.status.blocked,.status.cancelled{background:#da3633}.status.queued,.status.pendingCommitApproval,.status.pendingPushApproval{background:#9e6a03}
+    .status{display:inline-block;border-radius:999px;padding:2px 7px;font-size:11px;background:#30363d;color:var(--text)}.status.running{background:#1f6feb}.status.completed,.status.ok{background:#238636}.status.failed,.status.blocked,.status.cancelled,.status.fail{background:#da3633}.status.queued,.status.pendingCommitApproval,.status.pendingPushApproval,.status.warn,.status.unknown{background:#9e6a03}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-height:90px;margin-bottom:10px}
     .timeline{display:flex;flex-direction:column;gap:7px}.stage{display:grid;grid-template-columns:150px 110px 1fr;gap:8px;border-bottom:1px solid #1d252d;padding:6px 0}.muted{color:var(--muted)} pre{white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:360px;overflow:auto}
     .approval{border:1px solid var(--warn);border-radius:8px;padding:10px;margin:8px 0;background:#16130b}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .profile-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.profile{border:1px solid var(--line);border-radius:8px;padding:10px;background:#0d1117;min-height:128px}.profile.active{border-color:var(--accent);box-shadow:0 0 0 1px rgba(88,166,255,.25) inset}.profile-head{display:flex;gap:10px;align-items:center;margin-bottom:6px}.avatar{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;background:#21262d;color:#fff;font-weight:700}.profile p{margin:6px 0 0;color:var(--muted)}.agent-tags{display:flex;gap:6px;flex-wrap:wrap}.agent-tag{border:1px solid var(--line);background:#0d1117;border-radius:999px;padding:4px 8px;color:var(--text)}
+    .diagnostics{display:flex;flex-direction:column;gap:8px}.diag{display:grid;grid-template-columns:210px 90px 1fr;gap:10px;align-items:start;border:1px solid var(--line);border-radius:8px;padding:10px;background:#0d1117}.diag.ok{border-color:rgba(63,185,80,.45)}.diag.warn,.diag.unknown{border-color:rgba(210,153,34,.55)}.diag.fail{border-color:rgba(248,81,73,.55)}.diag .fix{margin-top:4px;color:var(--warn)}
   </style>
 </head>
 <body>
-<header><h1>Codex Workflow App</h1><div class="row"><span id="health" class="muted">connecting...</span><button class="secondary" onclick="refresh()">Refresh</button></div></header>
+<header><h1>Codex Workflow App</h1><div class="row"><span id="health" class="muted">connecting...</span><button class="secondary" onclick="showDiagnostics()">Diagnostics</button><button class="secondary" onclick="refresh()">Refresh</button></div></header>
 <main>
   <aside>
     <div class="newrun">
@@ -43,7 +44,7 @@ export function workflowAppHtml(): string {
   </section>
 </main>
 <script>
-let runs=[], selected=null;
+let runs=[], selected=null, view='home';
 const AGENT_PROFILES=[
   {role:'docs-agent',initial:'D',title:'Docs and rules',summary:'Reads repository rules, README files, package metadata, and conventions. Returns task constraints and implementation guidance.'},
   {role:'web-researcher',initial:'R',title:'Web research',summary:'Checks current external information and official docs when the task needs fresh facts. It stays read-only and cites source links when available.'},
@@ -62,6 +63,7 @@ async function api(path, opts){
   return r.status===204?null:r.json();
 }
 function badge(s){return '<span class="status '+String(s||'')+'">'+(s||'unknown')+'</span>'}
+function diagBadge(s){return '<span class="status '+String(s||'')+'">'+(s||'unknown')+'</span>'}
 function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function runtimeLabel(r){return (r.selectedRuntime||r.runtime||'auto')+' / '+(r.runKind||'multiAgent')}
 function rolesForRun(r){
@@ -100,6 +102,7 @@ function agentContextButtons(a){
   return '<div class="row"><button class="secondary" onclick="compactAgent(\\''+a.role+'\\')">Compact</button><button class="secondary" onclick="resetAgent(\\''+a.role+'\\')">Reset</button></div>';
 }
 function renderHome(){
+  view='home';
   const activeRuns=runs.filter(r=>['running','queued','pendingCommitApproval','pendingPushApproval'].includes(r.status));
   document.getElementById('detail').innerHTML=
     '<div class="card"><h2>Agent Profiles</h2>'+renderProfiles([])+'</div>'
@@ -121,6 +124,7 @@ async function refresh(){
     const hashId=decodeURIComponent((location.hash||'').replace(/^#/,''));
     if(hashId&&runs.some(r=>r.id===hashId)&&(!selected||selected.id!==hashId)){await loadRun(hashId);return}
     if(selected) await loadRun(selected.id);
+    else if(view==='diagnostics') await showDiagnostics(false);
     else renderHome();
   }catch(e){document.getElementById('health').textContent=e.message}
 }
@@ -129,11 +133,30 @@ function renderRuns(){
   root.innerHTML=runs.map(r=>'<div class="run '+(selected&&selected.id===r.id?'active':'')+'" onclick="loadRun(\\''+r.id.replace(/'/g,'')+'\\')"><div>'+badge(r.status)+' <b>'+esc((r.prompt||r.userPrompt||'').slice(0,70))+'</b></div><div class="id">'+esc(r.id)+'</div><div class="muted">'+esc(runtimeLabel(r))+'</div><div class="muted">'+esc(r.cwd)+'</div></div>').join('')||'<div class="muted">No runs</div>'
 }
 async function loadRun(id){
+  view='run';
   if(location.hash!==('#'+encodeURIComponent(id))) location.hash=encodeURIComponent(id);
   selected=await api('/api/runs/'+encodeURIComponent(id));
   selected.events=await api('/api/runs/'+encodeURIComponent(id)+'/events?limit=80');
   renderRuns();
   renderDetail(selected);
+}
+async function showDiagnostics(updateRuns){
+  view='diagnostics';
+  selected=null;
+  if(location.hash) history.replaceState(null,'',location.pathname+location.search);
+  const diagnostics=await api('/api/diagnostics');
+  if(updateRuns!==false){
+    runs=await api('/api/runs');
+    renderRuns();
+  }
+  renderDiagnostics(diagnostics);
+}
+function renderDiagnostics(diagnostics){
+  const checks=diagnostics.checks||[];
+  document.getElementById('detail').innerHTML=
+    '<div class="card"><h2>Diagnostics</h2><div class="muted">Generated '+esc(diagnostics.generatedAt||'')+'</div><div class="diagnostics">'
+    +checks.map(c=>'<div class="diag '+esc(c.status)+'"><b>'+esc(c.label||c.id)+'</b>'+diagBadge(c.status)+'<div><div>'+esc(c.detail)+'</div>'+(c.remediation?'<div class="fix">'+esc(c.remediation)+'</div>':'')+'</div></div>').join('')
+    +'</div></div>';
 }
 function renderDetail(r){
   const approvals=r.approvalRequests||[];

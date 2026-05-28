@@ -1,0 +1,59 @@
+name: Codex Workflow Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Package VSIX
+        run: npx --yes @vscode/vsce package --out haram-ai-agent-${{ github.sha }}.vsix
+
+      - name: Package Workflow App
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/codex-workflow
+          cp -R out release/codex-workflow/out
+          cp -R plugins release/codex-workflow/plugins
+          cp -R .agents release/codex-workflow/.agents
+          cp -R .codex release/codex-workflow/.codex
+          cp -R docs release/codex-workflow/docs
+          cp -R scripts release/codex-workflow/scripts
+          cp README.md package.json package-lock.json release/codex-workflow/
+          if [ -f LICENSE ]; then cp LICENSE release/codex-workflow/; fi
+          (cd release && zip -r ../codex-workflow-${{ github.sha }}.zip codex-workflow)
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: haram-ai-agent-vsix
+          path: haram-ai-agent-${{ github.sha }}.vsix
+
+      - name: Upload Workflow App artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-workflow-app
+          path: codex-workflow-${{ github.sha }}.zip

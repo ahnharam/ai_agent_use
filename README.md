@@ -1,6 +1,6 @@
 # Haram AI Agent
 
-**Haram AI Agent — AI Software Company** is a local VS Code extension that turns a PC into a small AI software team.
+**Haram AI Agent - AI Software Company** is a local VS Code extension that turns a PC into a small AI software team.
 
 The v0 team is fixed:
 
@@ -43,3 +43,13 @@ npm run compile
 ```
 
 The extension uses local LLM engines such as Ollama or LM Studio through the `haramAi.*` settings.
+
+## Codex Workflow
+
+The repo also includes a local Codex Workflow App and Codex Desktop plugin/MCP entrypoint.
+
+- Install guide: [docs/codex-workflow-install-guide.md](docs/codex-workflow-install-guide.md)
+- Plugin folder: [plugins/codex-workflow](plugins/codex-workflow)
+- Repo marketplace: [.agents/plugins/marketplace.json](.agents/plugins/marketplace.json)
+- One-command setup on Windows: `powershell -ExecutionPolicy Bypass -File scripts/setup-codex-workflow.ps1 -StartApp`
+- Health checks: `GET /api/health` and `GET /api/diagnostics` on `http://127.0.0.1:48731`

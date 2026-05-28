@@ -1,7 +1,7 @@
 {
-  "name": "personal",
+  "name": "haram-ai-agent-local",
   "interface": {
-    "displayName": "Personal"
+    "displayName": "Haram AI Agent Local Plugins"
   },
   "plugins": [
     {

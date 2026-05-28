@@ -8,13 +8,15 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 
-const PORT = Number(process.env.CODEX_WORKFLOW_PORT || 48731);
+const PLUGIN_ROOT = path.resolve(__dirname, '..');
+const CONFIG = loadWorkflowConfig();
+const PROJECT_ROOT = resolveProjectRoot(CONFIG);
+const CLI_PATH = path.join(PROJECT_ROOT, 'out', 'workflow-app', 'cli.js');
+const PORT = Number(process.env.CODEX_WORKFLOW_PORT || CONFIG.port || 48731);
 const HOST = process.env.CODEX_WORKFLOW_HOST || '127.0.0.1';
 const AUTH_TOKEN = process.env.CODEX_WORKFLOW_AUTH_TOKEN || loadOrCreateAuthToken();
+const CODEX_EXECUTABLE_PATH = process.env.CODEX_EXECUTABLE_PATH || CONFIG.codexExecutablePath || '';
 const BASE_URL = `http://${HOST}:${PORT}`;
-const PLUGIN_ROOT = path.resolve(__dirname, '..');
-const PROJECT_ROOT = path.resolve(PLUGIN_ROOT, '..', '..');
-const CLI_PATH = path.join(PROJECT_ROOT, 'out', 'workflow-app', 'cli.js');
 
 const tools = [
   {
@@ -230,14 +232,20 @@ async function ensureWorkflowApp() {
     // start below
   }
   if (!require('fs').existsSync(CLI_PATH)) {
-    throw new Error(`Workflow App backend is not built. Run npm run compile in ${PROJECT_ROOT}`);
+    throw new Error(`Workflow App backend is not built. Run npm run compile in ${PROJECT_ROOT}, or run scripts/setup-codex-workflow.ps1 to write the local projectRoot config.`);
   }
   const child = spawn(process.execPath, [CLI_PATH], {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
-    env: { ...process.env, CODEX_WORKFLOW_PORT: String(PORT), CODEX_WORKFLOW_AUTH_TOKEN: AUTH_TOKEN }
+    env: {
+      ...process.env,
+      CODEX_WORKFLOW_PORT: String(PORT),
+      CODEX_WORKFLOW_AUTH_TOKEN: AUTH_TOKEN,
+      CODEX_WORKFLOW_PROJECT_ROOT: PROJECT_ROOT,
+      ...(CODEX_EXECUTABLE_PATH ? { CODEX_EXECUTABLE_PATH } : {})
+    }
   });
   child.unref();
   const deadline = Date.now() + 8000;
@@ -307,8 +315,62 @@ function log(message) {
   process.stderr.write(`[codex-workflow] ${message}\n`);
 }
 
+function workflowHome() {
+  return path.join(os.homedir(), '.codex-workflow');
+}
+
+function loadWorkflowConfig() {
+  const configPath = path.join(workflowHome(), 'config.json');
+  try {
+    if (!fs.existsSync(configPath)) return {};
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''));
+    return {
+      projectRoot: typeof raw.projectRoot === 'string' ? raw.projectRoot : undefined,
+      codexExecutablePath: typeof raw.codexExecutablePath === 'string' ? raw.codexExecutablePath : undefined,
+      port: Number.isFinite(Number(raw.port)) ? Number(raw.port) : undefined
+    };
+  } catch (err) {
+    log(`Ignoring invalid config ${configPath}: ${err.message}`);
+    return {};
+  }
+}
+
+function resolveProjectRoot(config) {
+  const explicit = process.env.CODEX_WORKFLOW_PROJECT_ROOT || config.projectRoot;
+  if (explicit && hasWorkflowCli(explicit)) return path.resolve(explicit);
+  const scanned = scanForProjectRoot(PLUGIN_ROOT);
+  if (scanned) return scanned;
+  if (explicit) return path.resolve(explicit);
+  return path.resolve(PLUGIN_ROOT, '..', '..');
+}
+
+function scanForProjectRoot(start) {
+  let current = path.resolve(start);
+  while (true) {
+    if (hasWorkflowCli(current) || hasHaramPackage(current)) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function hasWorkflowCli(root) {
+  return fs.existsSync(path.join(root, 'out', 'workflow-app', 'cli.js'));
+}
+
+function hasHaramPackage(root) {
+  const packagePath = path.join(root, 'package.json');
+  try {
+    if (!fs.existsSync(packagePath)) return false;
+    const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    return pkg && pkg.name === 'haram-ai-agent';
+  } catch {
+    return false;
+  }
+}
+
 function loadOrCreateAuthToken() {
-  const p = path.join(os.homedir(), '.codex-workflow', 'token');
+  const p = path.join(workflowHome(), 'token');
   try {
     if (fs.existsSync(p)) {
       const existing = fs.readFileSync(p, 'utf8').trim();

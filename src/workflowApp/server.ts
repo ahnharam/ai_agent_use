@@ -33,6 +33,20 @@ export interface WorkflowAppServerOptions {
     maxActiveRuns?: number;
 }
 
+export interface WorkflowAppConfig {
+    projectRoot?: string;
+    codexExecutablePath?: string;
+    port?: number;
+}
+
+export interface DiagnosticCheck {
+    id: string;
+    label: string;
+    status: 'ok' | 'warn' | 'fail' | 'unknown';
+    detail: string;
+    remediation?: string;
+}
+
 interface RegistryEntry {
     id: string;
     cwd: string;
@@ -93,13 +107,17 @@ export class WorkflowAppServer {
     private maxActiveRuns: number;
     private authToken: string;
     private defaultRuntime: CodexRuntime;
+    private codexExecutablePath?: string;
+    private config: WorkflowAppConfig;
 
     constructor(private readonly options: WorkflowAppServerOptions) {
+        this.config = readWorkflowAppConfig();
         this.host = options.host || '127.0.0.1';
-        this.port = options.port || Number(process.env.CODEX_WORKFLOW_PORT || 48731);
+        this.port = options.port || Number(process.env.CODEX_WORKFLOW_PORT || this.config.port || 48731);
         this.maxActiveRuns = options.maxActiveRuns || Number(process.env.CODEX_WORKFLOW_MAX_ACTIVE_RUNS || 3);
         this.authToken = process.env.CODEX_WORKFLOW_AUTH_TOKEN || loadOrCreateAuthToken();
         this.defaultRuntime = normalizeRuntime(process.env.CODEX_WORKFLOW_RUNTIME);
+        this.codexExecutablePath = options.codexExecutablePath || process.env.CODEX_EXECUTABLE_PATH || this.config.codexExecutablePath;
         this.registryPath = path.join(workflowAppHome(), 'runs.json');
         this.registry = this.loadRegistry();
         this.restoreQueuedRuns();
@@ -132,7 +150,7 @@ export class WorkflowAppServer {
             }
             if (method === 'GET' && url.pathname === '/') return this.html(res, workflowAppHtml());
             if (method === 'GET' && url.pathname === '/api/health') {
-                const executable = resolveCodexExecutable(this.options.codexExecutablePath);
+                const executable = resolveCodexExecutable(this.codexExecutablePath);
                 const probe = probeCodexExecutable(executable);
                 return this.json(res, {
                     ok: true,
@@ -151,6 +169,9 @@ export class WorkflowAppServer {
                     authenticated: this.isAuthorized(req, url),
                     codexExecutable: executable,
                 });
+            }
+            if (method === 'GET' && url.pathname === '/api/diagnostics') {
+                return this.json(res, this.buildDiagnostics(req, url));
             }
             if (method === 'GET' && url.pathname === '/api/runs') {
                 const status = url.searchParams.get('status') || '';
@@ -336,7 +357,7 @@ export class WorkflowAppServer {
         const controller = new CodexWorkflowController({
             extensionPath: this.options.projectRoot,
             workspaceRoot: cwd,
-            codexExecutablePath: this.options.codexExecutablePath,
+            codexExecutablePath: this.codexExecutablePath,
             defaultContextMode: 'fresh',
             maxRepairLoops: 2,
             alwaysUseWorktree: true,
@@ -536,6 +557,93 @@ export class WorkflowAppServer {
         fs.writeFileSync(this.registryPath, JSON.stringify(this.registry, null, 2), 'utf-8');
     }
 
+    private buildDiagnostics(req: http.IncomingMessage, url: URL): { checks: DiagnosticCheck[]; generatedAt: string } {
+        const projectRoot = path.resolve(this.options.projectRoot);
+        const configPath = workflowAppConfigPath();
+        const tokenPath = workflowAppTokenPath();
+        const codexExecutable = resolveCodexExecutable(this.codexExecutablePath);
+        const codexProbe = probeCodexExecutable(codexExecutable);
+        const checks: DiagnosticCheck[] = [];
+
+        checks.push(check(
+            'project-root',
+            'Project root',
+            fs.existsSync(path.join(projectRoot, 'package.json')) ? 'ok' : 'fail',
+            projectRoot,
+            'Set CODEX_WORKFLOW_PROJECT_ROOT or run scripts/setup-codex-workflow.ps1 from the cloned repo.'
+        ));
+        checks.push(check(
+            'workflow-build',
+            'Workflow app build',
+            fs.existsSync(path.join(projectRoot, 'out', 'workflow-app', 'cli.js')) ? 'ok' : 'fail',
+            path.join(projectRoot, 'out', 'workflow-app', 'cli.js'),
+            'Run npm run compile.'
+        ));
+        const agentDir = path.join(projectRoot, '.codex', 'agents');
+        const agentCount = fs.existsSync(agentDir) ? fs.readdirSync(agentDir).filter(name => name.endsWith('.toml')).length : 0;
+        checks.push(check(
+            'agent-definitions',
+            'Codex agent definitions',
+            agentCount > 0 ? 'ok' : 'fail',
+            `${agentCount} agent definition file(s) found`,
+            'Restore .codex/agents/*.toml from the repo.'
+        ));
+        checks.push(check(
+            'node',
+            'Node.js',
+            'ok',
+            process.version
+        ));
+        checks.push(commandCheck('npm', 'npm', ['--version']));
+        checks.push(commandCheck('git', 'Git', ['--version']));
+        checks.push(check(
+            'codex-executable',
+            'Codex executable',
+            codexProbe.ok ? 'ok' : 'fail',
+            `${codexProbe.executable}${codexProbe.version ? ` (${codexProbe.version})` : ''}${codexProbe.ok ? '' : ` - ${codexProbe.message}`}`,
+            'Install Codex Desktop/CLI, or pass -CodexExecutablePath to scripts/setup-codex-workflow.ps1.'
+        ));
+        checks.push(appServerCheck(codexExecutable, codexProbe.ok));
+        checks.push(check(
+            'sdk-dependency',
+            'Codex SDK dependency',
+            isSdkRuntimeAvailable() ? 'ok' : 'warn',
+            isSdkRuntimeAvailable() ? '@openai/codex-sdk can be loaded.' : '@openai/codex-sdk is not loadable in this build.',
+            'Run npm ci and npm run compile.'
+        ));
+        checks.push(check(
+            'marketplace',
+            'Repo marketplace file',
+            fs.existsSync(path.join(projectRoot, '.agents', 'plugins', 'marketplace.json')) ? 'ok' : 'warn',
+            path.join(projectRoot, '.agents', 'plugins', 'marketplace.json'),
+            'Restore .agents/plugins/marketplace.json or run setup without -SkipMarketplace.'
+        ));
+        checks.push(check(
+            'local-config',
+            'Local config file',
+            fs.existsSync(configPath) ? 'ok' : 'warn',
+            configPath,
+            'Run scripts/setup-codex-workflow.ps1 to create the config.'
+        ));
+        checks.push(check(
+            'local-token',
+            'Local capability token',
+            fs.existsSync(tokenPath) ? 'ok' : 'warn',
+            fs.existsSync(tokenPath) ? 'Token file exists. Value is hidden.' : 'Token file is missing.',
+            'Start the Workflow App or run setup to create a local token.'
+        ));
+        checks.push(check(
+            'api-auth',
+            'API browser auth',
+            this.isAuthorized(req, url) ? 'ok' : 'warn',
+            this.isAuthorized(req, url) ? 'Current request is authenticated.' : 'Current request is not authenticated; read-only diagnostics are public.',
+            'Open the Workflow App UI once so the local auth cookie is set.'
+        ));
+        checks.push(gitCredentialCheck(projectRoot));
+
+        return { checks, generatedAt: new Date().toISOString() };
+    }
+
     private handleUpgrade(req: http.IncomingMessage, socket: WsSocket): void {
         const url = new URL(req.url || '/', `http://${req.headers.host || `${this.host}:${this.port}`}`);
         if (url.pathname !== '/ws' || !this.isAuthorized(req, url)) {
@@ -611,7 +719,7 @@ export class WorkflowAppServer {
     }
 
     private requiresAuth(method: string, pathname: string): boolean {
-        if (method === 'GET' && (pathname === '/' || pathname === '/api/health')) return false;
+        if (method === 'GET' && (pathname === '/' || pathname === '/api/health' || pathname === '/api/diagnostics')) return false;
         return pathname.startsWith('/api/') || method !== 'GET';
     }
 
@@ -634,12 +742,35 @@ export function openWorkflowApp(url: string): void {
     }
 }
 
-function workflowAppHome(): string {
+export function workflowAppHome(): string {
     return path.join(os.homedir(), '.codex-workflow');
 }
 
+export function workflowAppConfigPath(): string {
+    return path.join(workflowAppHome(), 'config.json');
+}
+
+export function workflowAppTokenPath(): string {
+    return path.join(workflowAppHome(), 'token');
+}
+
+export function readWorkflowAppConfig(): WorkflowAppConfig {
+    const p = workflowAppConfigPath();
+    try {
+        if (!fs.existsSync(p)) return {};
+        const raw = JSON.parse(fs.readFileSync(p, 'utf-8').replace(/^\uFEFF/, '')) as WorkflowAppConfig;
+        return {
+            projectRoot: typeof raw.projectRoot === 'string' ? raw.projectRoot : undefined,
+            codexExecutablePath: typeof raw.codexExecutablePath === 'string' ? raw.codexExecutablePath : undefined,
+            port: Number.isFinite(Number(raw.port)) ? Number(raw.port) : undefined,
+        };
+    } catch {
+        return {};
+    }
+}
+
 function loadOrCreateAuthToken(): string {
-    const p = path.join(workflowAppHome(), 'token');
+    const p = workflowAppTokenPath();
     try {
         if (fs.existsSync(p)) {
             const existing = fs.readFileSync(p, 'utf-8').trim();
@@ -651,6 +782,78 @@ function loadOrCreateAuthToken(): string {
         return token;
     } catch {
         return crypto.randomBytes(24).toString('hex');
+    }
+}
+
+function check(id: string, label: string, status: DiagnosticCheck['status'], detail: string, remediation?: string): DiagnosticCheck {
+    const value: DiagnosticCheck = { id, label, status, detail };
+    if (status !== 'ok' && remediation) value.remediation = remediation;
+    return value;
+}
+
+function commandCheck(command: string, label: string, args: string[]): DiagnosticCheck {
+    const candidates = process.platform === 'win32' && !/\.(cmd|exe|bat)$/i.test(command)
+        ? [command, `${command}.cmd`, `${command}.exe`, path.join(path.dirname(process.execPath), `${command}.cmd`), path.join(path.dirname(process.execPath), `${command}.exe`)]
+        : [command];
+    let lastError = '';
+    for (const candidate of candidates) {
+        try {
+            const commandForShell = process.platform === 'win32' && candidate.includes(path.sep) ? `"${candidate}"` : candidate;
+            const res = spawnSync(commandForShell, args, { encoding: 'utf-8', timeout: 10000, windowsHide: true, shell: process.platform === 'win32' });
+            if (res.error) {
+                lastError = res.error.message;
+                continue;
+            }
+            const text = String(res.stdout || res.stderr || '').trim();
+            return res.status === 0
+                ? check(command, label, 'ok', text || `${candidate} is available.`)
+                : check(command, label, 'fail', text || `exit ${res.status}`, `Install ${label} and make sure it is on PATH.`);
+        } catch (e: any) {
+            lastError = e?.message || String(e);
+        }
+    }
+    return check(command, label, 'fail', lastError || `${command} was not found`, `Install ${label} and make sure it is on PATH.`);
+}
+
+function appServerCheck(executable: string, codexExecutableOk: boolean): DiagnosticCheck {
+    if (!codexExecutableOk) {
+        return check('app-server-probe', 'Codex app-server probe', 'unknown', 'Skipped because Codex executable is not runnable.', 'Fix the Codex executable path first.');
+    }
+    try {
+        const res = spawnSync(executable, ['app-server', '--help'], {
+            encoding: 'utf-8',
+            timeout: 10000,
+            windowsHide: true,
+            env: process.env,
+        });
+        if (res.error) {
+            return check('app-server-probe', 'Codex app-server probe', 'fail', res.error.message, 'Update Codex Desktop/CLI or set a working Codex executable path.');
+        }
+        const text = String(res.stdout || res.stderr || '').trim();
+        if (res.status === 0 || /app-server|json-rpc|usage/i.test(text)) {
+            return check('app-server-probe', 'Codex app-server probe', 'ok', text.split(/\r?\n/).slice(0, 2).join(' ') || 'app-server command is available.');
+        }
+        return check('app-server-probe', 'Codex app-server probe', 'warn', text || `exit ${res.status}`, 'Update Codex Desktop/CLI if multi-agent runtime fails.');
+    } catch (e: any) {
+        return check('app-server-probe', 'Codex app-server probe', 'fail', e?.message || String(e), 'Update Codex Desktop/CLI or set a working Codex executable path.');
+    }
+}
+
+function gitCredentialCheck(cwd: string): DiagnosticCheck {
+    try {
+        const helper = spawnSync('git', ['config', '--get', 'credential.helper'], {
+            cwd,
+            encoding: 'utf-8',
+            timeout: 10000,
+            windowsHide: true,
+        });
+        const text = String(helper.stdout || '').trim();
+        if (helper.status === 0 && text) {
+            return check('git-credential', 'Git credential hint', 'ok', `credential.helper=${text}`);
+        }
+        return check('git-credential', 'Git credential hint', 'warn', 'No git credential.helper is configured for this repo.', 'Run git credential setup or GitHub CLI login before approving push operations.');
+    } catch (e: any) {
+        return check('git-credential', 'Git credential hint', 'unknown', e?.message || String(e), 'Install Git and configure credentials before approving push operations.');
     }
 }
 

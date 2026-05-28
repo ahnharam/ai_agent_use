@@ -1,17 +1,18 @@
 import { app, BrowserWindow } from 'electron';
 import * as path from 'path';
-import { WorkflowAppServer } from './server';
+import { WorkflowAppServer, readWorkflowAppConfig } from './server';
 
 let server: WorkflowAppServer | null = null;
 let win: BrowserWindow | null = null;
 
 async function createWindow(): Promise<void> {
-    const projectRoot = path.resolve(__dirname, '..', '..');
+    const config = readWorkflowAppConfig();
+    const projectRoot = path.resolve(process.env.CODEX_WORKFLOW_PROJECT_ROOT || config.projectRoot || path.resolve(__dirname, '..', '..'));
     server = new WorkflowAppServer({
         projectRoot,
         host: '127.0.0.1',
-        port: Number(process.env.CODEX_WORKFLOW_PORT || 48731),
-        codexExecutablePath: process.env.CODEX_EXECUTABLE_PATH,
+        port: Number(process.env.CODEX_WORKFLOW_PORT || config.port || 48731),
+        codexExecutablePath: process.env.CODEX_EXECUTABLE_PATH || config.codexExecutablePath,
     });
     await server.listen();
     win = new BrowserWindow({
