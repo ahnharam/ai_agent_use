@@ -58,6 +58,8 @@ setup 스크립트가 수행하는 작업:
 - repo marketplace 등록 시도
 - `-StartApp` 지정 시 Workflow App hidden process 실행 후 health check
 
+중요: setup 스크립트는 Codex Desktop plugin 설치/활성화까지 보장하지 않는다. marketplace 등록 후 Codex Desktop을 재시작하고 Plugins 화면에서 `Codex Workflow`를 설치/활성화해야 한다.
+
 옵션:
 
 ```powershell
@@ -105,11 +107,18 @@ setup 스크립트를 쓰지 않고 직접 등록하려면:
 
 ```powershell
 codex plugin marketplace add "D:\path\to\haram_project"
-codex plugin marketplace upgrade
 codex plugin marketplace --help
 ```
 
-그 다음 Codex Desktop을 재시작하고 Plugins 화면에서 `Codex Workflow`를 설치 또는 활성화한다.
+`codex plugin marketplace upgrade`는 Git marketplace 갱신용이다. 이 repo처럼 local marketplace를 등록한 경우 `not configured as a Git marketplace`로 실패할 수 있으므로 사용하지 않는다.
+
+그 다음 Codex Desktop을 재시작하고 Plugins 화면에서 `Codex Workflow`를 설치 또는 활성화한다. 현재 marketplace 이름은 `haram-ai-agent-local`이므로 실제 plugin id는 다음과 같다.
+
+```text
+codex-workflow@haram-ai-agent-local
+```
+
+예전 테스트 설정에 `codex-workflow@personal`이 남아 있다면 제거하거나 비활성화하고, `codex-workflow@haram-ai-agent-local`을 설치/활성화한다.
 
 plugin이 보이지 않으면 확인할 것:
 

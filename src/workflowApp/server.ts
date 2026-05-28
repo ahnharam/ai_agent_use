@@ -67,6 +67,9 @@ type WsSocket = import('stream').Duplex;
 const TERMINAL = new Set(['completed', 'failed', 'blocked', 'cancelled']);
 const WAITING_FOR_APPROVAL = new Set(['pendingCommitApproval', 'pendingPushApproval']);
 const AUTH_COOKIE_NAME = 'codex_workflow_token';
+const CODEX_WORKFLOW_MARKETPLACE_NAME = 'haram-ai-agent-local';
+const CODEX_WORKFLOW_PLUGIN_ID = `codex-workflow@${CODEX_WORKFLOW_MARKETPLACE_NAME}`;
+const LEGACY_CODEX_WORKFLOW_PLUGIN_ID = 'codex-workflow@personal';
 
 interface WorkflowRunSummary {
     id: string;
@@ -618,6 +621,8 @@ export class WorkflowAppServer {
             path.join(projectRoot, '.agents', 'plugins', 'marketplace.json'),
             'Restore .agents/plugins/marketplace.json or run setup without -SkipMarketplace.'
         ));
+        checks.push(codexMarketplaceConfigCheck(projectRoot));
+        checks.push(codexPluginConfigCheck());
         checks.push(check(
             'local-config',
             'Local config file',
@@ -855,6 +860,61 @@ function gitCredentialCheck(cwd: string): DiagnosticCheck {
     } catch (e: any) {
         return check('git-credential', 'Git credential hint', 'unknown', e?.message || String(e), 'Install Git and configure credentials before approving push operations.');
     }
+}
+
+function codexConfigTomlPath(): string {
+    return path.join(os.homedir(), '.codex', 'config.toml');
+}
+
+function codexMarketplaceConfigCheck(projectRoot: string): DiagnosticCheck {
+    const configPath = codexConfigTomlPath();
+    try {
+        if (!fs.existsSync(configPath)) {
+            return check('codex-marketplace-registration', 'Codex marketplace registration', 'unknown', `${configPath} does not exist.`, 'Run setup or codex plugin marketplace add from the cloned repo.');
+        }
+        const text = fs.readFileSync(configPath, 'utf-8');
+        const hasMarketplace = new RegExp(`\\[marketplaces\\.(?:"${escapeRegExp(CODEX_WORKFLOW_MARKETPLACE_NAME)}"|${escapeRegExp(CODEX_WORKFLOW_MARKETPLACE_NAME)})\\]`).test(text);
+        return hasMarketplace
+            ? check('codex-marketplace-registration', 'Codex marketplace registration', 'ok', `${CODEX_WORKFLOW_MARKETPLACE_NAME} is registered in Codex config.`)
+            : check('codex-marketplace-registration', 'Codex marketplace registration', 'warn', `${CODEX_WORKFLOW_MARKETPLACE_NAME} is not registered in Codex config.`, `Run codex plugin marketplace add "${projectRoot}".`);
+    } catch (e: any) {
+        return check('codex-marketplace-registration', 'Codex marketplace registration', 'unknown', e?.message || String(e), 'Check ~/.codex/config.toml manually.');
+    }
+}
+
+function codexPluginConfigCheck(): DiagnosticCheck {
+    const configPath = codexConfigTomlPath();
+    try {
+        if (!fs.existsSync(configPath)) {
+            return check('codex-plugin-activation', 'Codex plugin activation', 'unknown', `${configPath} does not exist.`, 'Install and enable Codex Workflow from Codex Desktop Plugins.');
+        }
+        const text = fs.readFileSync(configPath, 'utf-8');
+        const expectedSection = tomlSection(text, `plugins."${CODEX_WORKFLOW_PLUGIN_ID}"`);
+        const legacySection = tomlSection(text, `plugins."${LEGACY_CODEX_WORKFLOW_PLUGIN_ID}"`);
+        if (sectionEnabled(expectedSection)) {
+            return check('codex-plugin-activation', 'Codex plugin activation', 'ok', `${CODEX_WORKFLOW_PLUGIN_ID} is enabled in Codex config.`);
+        }
+        if (legacySection) {
+            return check('codex-plugin-activation', 'Codex plugin activation', 'warn', `Legacy ${LEGACY_CODEX_WORKFLOW_PLUGIN_ID} remains in Codex config.`, `Disable/remove ${LEGACY_CODEX_WORKFLOW_PLUGIN_ID}, then install/enable ${CODEX_WORKFLOW_PLUGIN_ID} in Codex Desktop Plugins.`);
+        }
+        return check('codex-plugin-activation', 'Codex plugin activation', 'warn', `${CODEX_WORKFLOW_PLUGIN_ID} is not enabled in Codex config.`, 'Restart Codex Desktop, then install/enable Codex Workflow in the Plugins screen.');
+    } catch (e: any) {
+        return check('codex-plugin-activation', 'Codex plugin activation', 'unknown', e?.message || String(e), 'Check ~/.codex/config.toml manually.');
+    }
+}
+
+function tomlSection(text: string, header: string): string {
+    const escaped = escapeRegExp(`[${header}]`);
+    const match = new RegExp(`${escaped}\\s*([\\s\\S]*?)(?=\\n\\[|$)`).exec(text);
+    return match ? match[1] : '';
+}
+
+function sectionEnabled(section: string): boolean {
+    return /^\s*enabled\s*=\s*true\s*$/m.test(section);
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function normalizeContextMode(value: any): CodexContextMode {

@@ -137,6 +137,27 @@ function Register-Marketplace {
     }
 }
 
+function Write-PluginActivationHint {
+    $expectedPluginId = "codex-workflow@haram-ai-agent-local"
+    $oldPluginId = "codex-workflow@personal"
+    $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
+
+    Write-Host ""
+    Write-Host "Plugin activation is still a Codex Desktop UI step."
+    Write-Host "Expected plugin id: $expectedPluginId"
+    Write-Host "Restart Codex Desktop, then install/enable 'Codex Workflow' in the Plugins screen."
+
+    if (Test-Path -LiteralPath $codexConfig) {
+        $text = Get-Content -Raw -LiteralPath $codexConfig
+        if ($text -match [regex]::Escape($oldPluginId)) {
+            Write-Warning "Old plugin id remains in Codex config: $oldPluginId. Disable/remove it and enable $expectedPluginId."
+        }
+        if ($text -notmatch [regex]::Escape($expectedPluginId)) {
+            Write-Warning "$expectedPluginId is not enabled in Codex config yet. This is expected until the Desktop Plugins UI installs/enables it."
+        }
+    }
+}
+
 function Start-WorkflowApp {
     param(
         [string]$Root,
@@ -205,6 +226,8 @@ if (-not $SkipMarketplace) {
     Write-Step "Registering Codex plugin marketplace"
     Register-Marketplace -Root $ProjectRoot -CodexPath $codexPath
 }
+
+Write-PluginActivationHint
 
 if ($StartApp) {
     Write-Step "Starting Workflow App"
