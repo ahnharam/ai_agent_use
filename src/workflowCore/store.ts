@@ -6,8 +6,10 @@ export type CodexRuntime = 'auto' | 'app-server' | 'sdk';
 export type SelectedCodexRuntime = 'app-server' | 'sdk';
 export type WorkflowRunKind = 'automation' | 'readOnly' | 'approvalRequired' | 'multiAgent' | 'contextControl' | 'codeChange' | 'gitOperation';
 export type WorkflowStatus = 'idle' | 'queued' | 'running' | 'blocked' | 'pendingCommitApproval' | 'pendingPushApproval' | 'completed' | 'failed' | 'cancelled';
-export type StageStatus = 'pending' | 'running' | 'skipped' | 'completed' | 'failed';
-export type AgentStatus = 'idle' | 'running' | 'blocked' | 'completed' | 'failed' | 'reset';
+export type StageStatus = 'pending' | 'running' | 'skipped' | 'completed' | 'failed' | 'cancelled';
+export type KnowledgeExecutionProfile = 'fast-readonly' | 'standard' | 'deep-audit';
+export type WorkflowCancelSource = 'ui' | 'api' | 'smoke-watchdog' | 'system';
+export type AgentStatus = 'idle' | 'running' | 'blocked' | 'completed' | 'failed' | 'cancelled' | 'reset';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'blocked';
 export type ApprovalType = 'commit' | 'push' | 'worktree' | 'merge-back' | 'destructive' | 'external';
 export type AgentRequestStatus = 'pending' | 'answered' | 'failed';
@@ -89,8 +91,48 @@ export interface WorkflowWriterLock {
     staleReason?: string;
 }
 
+export interface KnowledgeRoutingSkill {
+    name: string;
+    sourcePath: string;
+    chunkId: string;
+    score: number;
+    sourceHash: string;
+    snippet: string;
+}
+
+export interface KnowledgeRoutingCitation {
+    sourcePath: string;
+    chunkId: string;
+    score: number;
+    sourceHash: string;
+    snippet: string;
+}
+
+export interface KnowledgeRoutingDecision {
+    runId: string;
+    cwd: string;
+    runKind: WorkflowRunKind;
+    promptHash: string;
+    executionProfile: KnowledgeExecutionProfile;
+    selectedWorkers: string[];
+    coordinatorRole?: string;
+    selectedSkills: KnowledgeRoutingSkill[];
+    retrievalQueries: string[];
+    citations: KnowledgeRoutingCitation[];
+    reasonsKo: string[];
+    warnings: string[];
+    createdAt: string;
+    tracePath?: string;
+}
+
 export interface WorkflowArtifacts {
     docsSummary?: string;
+    knowledgeSourceSummary?: string;
+    knowledgeIndexSummary?: string;
+    ragRetrievalSummary?: string;
+    knowledgeAuditSummary?: string;
+    wikiExportSummary?: string;
+    knowledgeSummary?: string;
     webResearchSummary?: string;
     gitPlan?: string;
     coderSummary?: string;
@@ -103,6 +145,10 @@ export interface WorkflowArtifacts {
     finalSummary?: string;
     lastDiff?: string;
     assignedRoles?: string[];
+    knowledgeRouting?: KnowledgeRoutingDecision;
+    cancelRequestedAt?: string;
+    cancelSource?: WorkflowCancelSource;
+    cancelReason?: string;
 }
 
 export interface ApprovalRequest {
@@ -169,6 +215,11 @@ export interface WorkflowRun {
 
 export const CODEX_WORKFLOW_ROLES = [
     'docs-agent',
+    'knowledge-source-agent',
+    'knowledge-index-agent',
+    'rag-retriever-agent',
+    'knowledge-auditor-agent',
+    'wiki-export-agent',
     'web-researcher',
     'git-manager',
     'designer',

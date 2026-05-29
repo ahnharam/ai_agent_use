@@ -5,7 +5,7 @@ import {
     probeCodexExecutable,
     resolveCodexExecutable,
 } from './codexAppServerClient';
-import { spawn } from 'child_process';
+import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import * as readline from 'readline';
 import type { ServerNotification, ServerRequest } from '../generated/codex-app-server';
 import type { CodexRuntime, SelectedCodexRuntime, WorkflowRunKind } from './store';
@@ -121,6 +121,7 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
     public readonly version = 'sdk';
     private codex: any;
     private threads = new Map<string, any>();
+    private activeChildren = new Set<ChildProcessWithoutNullStreams>();
     private nextThreadId = 1;
 
     constructor(private readonly options: CodexRuntimeAdapterOptions) {}
@@ -135,6 +136,10 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
     }
 
     public async stop(): Promise<void> {
+        for (const child of Array.from(this.activeChildren)) {
+            this.killFallbackProcess(child);
+        }
+        this.activeChildren.clear();
         this.threads.clear();
         this.codex = null;
     }
@@ -247,6 +252,7 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
                 stdio: ['pipe', 'pipe', 'pipe'],
                 env: process.env,
             });
+            this.activeChildren.add(child);
             let text = '';
             let diff = '';
             let error = '';
@@ -257,8 +263,9 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
                 settled = true;
                 clearTimeout(timer);
                 rl.close();
+                this.activeChildren.delete(child);
                 if (code !== undefined && code !== null && code !== 0 && !error) error = `Codex SDK fallback exited with code ${code}.`;
-                try { if (!child.killed) child.kill(); } catch { /* ignore */ }
+                if (code === undefined || code === null) this.killFallbackProcess(child);
                 resolve({
                     turnId,
                     status: error ? 'failed' : 'completed',
@@ -302,6 +309,22 @@ export class SdkRuntimeAdapter implements CodexRuntimeAdapter {
                 finish(null);
             });
         });
+    }
+
+    private killFallbackProcess(child: ChildProcessWithoutNullStreams): void {
+        if (!child.pid || child.killed) return;
+        try {
+            if (process.platform === 'win32') {
+                spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+                    windowsHide: true,
+                    stdio: 'ignore',
+                }).unref();
+            } else {
+                child.kill('SIGTERM');
+            }
+        } catch {
+            try { child.kill(); } catch { /* ignore */ }
+        }
     }
 
     private toThreadOptions(params: RuntimeThreadParams): any {

@@ -54,3 +54,4 @@ The repo also includes a local Codex Workflow App and Codex Desktop plugin/MCP e
 - Plugin id after local marketplace registration: `codex-workflow@haram-ai-agent-local`
 - One-command setup on Windows: `powershell -ExecutionPolicy Bypass -File scripts/setup-codex-workflow.ps1 -StartApp`
 - Health checks: `GET /api/health` and `GET /api/diagnostics` on `http://127.0.0.1:48731`
+- Auto update checks: `GET /api/update/status`, `POST /api/update/check`, `POST /api/update/apply`

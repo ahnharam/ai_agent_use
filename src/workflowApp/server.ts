@@ -20,6 +20,7 @@ import {
     WorkflowGitState,
     WorkflowRun,
     WorkflowRunKind,
+    WorkflowCancelSource,
 } from '../workflowCore/store';
 import { createRuntimeAdapter, isSdkRuntimeAvailable } from '../workflowCore/runtimeAdapter';
 import { probeCodexExecutable, resolveCodexExecutable } from '../workflowCore/codexAppServerClient';
@@ -33,12 +34,38 @@ import {
     scanProjectDocuments,
 } from '../workflowCore/documentContext';
 import {
+    detectKnowledgeSources,
+    exportKnowledgeVault,
+    applyAndPrepareLocalRagProviderRecommendation,
+    applyRagProviderRecommendation,
+    emptyRagProviderRecommendations,
+    readKnowledgeStatus,
+    readRagProviderRecommendations,
+    rebuildKnowledgeIndex,
+    recommendRagProviders,
+    runRagRecommendationAction,
+    searchKnowledgeAsync,
+    verifyKnowledge,
+    absorbProjectKnowledge,
+    activateKnowledgeIntegration,
+    compileProjectCapabilities,
+    evaluateKnowledgeIntegration,
+    readKnowledgeIntegrationStatus,
+} from '../workflowCore/knowledge';
+import {
     readWorkflowWriterLocks,
     readGitRoutingMutex,
     gitRepositoryLockRoot,
     workflowLocksDir,
 } from '../workflowCore/gitRoutingSafety';
 import { workflowAppHtml } from './ui';
+import {
+    AutoUpdateMode,
+    normalizeAutoUpdateMode,
+    readUpdateLock,
+    readWorkflowUpdateConfig,
+    WorkflowUpdateManager,
+} from './updateManager';
 
 export interface WorkflowAppServerOptions {
     host?: string;
@@ -52,6 +79,10 @@ export interface WorkflowAppConfig {
     projectRoot?: string;
     codexExecutablePath?: string;
     port?: number;
+    autoUpdateMode?: AutoUpdateMode;
+    updateIntervalSec?: number;
+    updateRemote?: string;
+    updateBranch?: string;
 }
 
 export interface DiagnosticCheck {
@@ -126,6 +157,7 @@ export class WorkflowAppServer {
     private defaultRuntime: CodexRuntime;
     private codexExecutablePath?: string;
     private config: WorkflowAppConfig;
+    private updateManager: WorkflowUpdateManager;
 
     constructor(private readonly options: WorkflowAppServerOptions) {
         this.config = readWorkflowAppConfig();
@@ -138,17 +170,30 @@ export class WorkflowAppServer {
         this.registryPath = path.join(workflowAppHome(), 'runs.json');
         this.registry = this.loadRegistry();
         this.restoreQueuedRuns();
+        this.updateManager = new WorkflowUpdateManager({
+            projectRoot: path.resolve(options.projectRoot),
+            host: this.host,
+            port: this.port,
+            authToken: this.authToken,
+            codexExecutablePath: this.codexExecutablePath,
+            getRuntimeBlockers: () => this.updateRuntimeBlockers(),
+            emit: (type, payload) => this.broadcast(type, payload),
+        });
         this.server = http.createServer((req, res) => void this.handleHttp(req, res));
         this.server.on('upgrade', (req, socket) => this.handleUpgrade(req, socket));
     }
 
     public listen(): Promise<void> {
         return new Promise(resolve => {
-            this.server.listen(this.port, this.host, () => resolve());
+            this.server.listen(this.port, this.host, () => {
+                this.updateManager.start();
+                resolve();
+            });
         });
     }
 
     public close(): Promise<void> {
+        this.updateManager.stop();
         for (const socket of this.sockets) socket.destroy();
         return new Promise(resolve => this.server.close(() => resolve()));
     }
@@ -181,6 +226,7 @@ export class WorkflowAppServer {
                         appServerAvailable: probe.ok,
                         sdkAvailable: isSdkRuntimeAvailable(),
                     },
+                    update: this.updateManager.currentStatus(),
                     sdkAvailable: isSdkRuntimeAvailable(),
                     appServerAvailable: probe.ok,
                     authenticated: this.isAuthorized(req, url),
@@ -189,6 +235,22 @@ export class WorkflowAppServer {
             }
             if (method === 'GET' && url.pathname === '/api/diagnostics') {
                 return this.json(res, this.buildDiagnostics(req, url));
+            }
+            if (method === 'GET' && url.pathname === '/api/update/status') {
+                return this.json(res, this.updateManager.currentStatus());
+            }
+            if (method === 'POST' && url.pathname === '/api/update/check') {
+                return this.json(res, await this.updateManager.checkNow({ allowAutoApply: false }));
+            }
+            if (method === 'POST' && url.pathname === '/api/update/apply') {
+                return this.json(res, await this.updateManager.applyNow(false));
+            }
+            if (method === 'POST' && url.pathname === '/api/update/restart') {
+                return this.json(res, await this.updateManager.restartNow());
+            }
+            if (method === 'POST' && url.pathname === '/api/update/config') {
+                const body = await readJson(req);
+                return this.json(res, await this.updateManager.setAutoUpdateMode(normalizeAutoUpdateMode(body.autoUpdateMode)));
             }
             const docsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/docs(?:\/(.+))?$/);
             if (docsMatch) {
@@ -219,6 +281,79 @@ export class WorkflowAppServer {
                 }
                 if (method === 'GET' && action === 'cache') {
                     return this.json(res, readDocumentCacheState(cwd));
+                }
+            }
+            const knowledgeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/knowledge(?:\/(.+))?$/);
+            if (knowledgeMatch) {
+                const cwd = path.resolve(decodeURIComponent(knowledgeMatch[1]));
+                const action = knowledgeMatch[2] || '';
+                if (method === 'POST' && action === 'detect') {
+                    return this.json(res, detectKnowledgeSources(cwd));
+                }
+                if (method === 'POST' && action === 'export') {
+                    return this.json(res, exportKnowledgeVault(cwd));
+                }
+                if (method === 'POST' && action === 'verify') {
+                    return this.json(res, verifyKnowledge(cwd));
+                }
+                if (method === 'POST' && action === 'absorb') {
+                    return this.json(res, absorbProjectKnowledge(cwd));
+                }
+                if (method === 'POST' && action === 'compile') {
+                    return this.json(res, compileProjectCapabilities(cwd));
+                }
+                if (method === 'POST' && action === 'index/build') {
+                    return this.json(res, await rebuildKnowledgeIndex(cwd));
+                }
+                if (method === 'POST' && action === 'integration/evaluate') {
+                    return this.json(res, evaluateKnowledgeIntegration(cwd));
+                }
+                if (method === 'POST' && action === 'integration/activate') {
+                    return this.json(res, activateKnowledgeIntegration(cwd));
+                }
+                if (method === 'GET' && action === 'integration/status') {
+                    return this.json(res, readKnowledgeIntegrationStatus(cwd));
+                }
+                if (method === 'POST' && action === 'open') {
+                    const body = await readJson(req);
+                    return this.json(res, this.openKnowledgeTarget(cwd, String(body.target || 'llms')));
+                }
+                if (method === 'GET' && action === 'status') {
+                    return this.json(res, readKnowledgeStatus(cwd));
+                }
+            }
+            const ragMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/rag(?:\/(.+))?$/);
+            if (ragMatch) {
+                const cwd = path.resolve(decodeURIComponent(ragMatch[1]));
+                const action = ragMatch[2] || '';
+                if (method === 'POST' && action === 'rebuild') {
+                    return this.json(res, await rebuildKnowledgeIndex(cwd));
+                }
+                if (method === 'GET' && action === 'status') {
+                    return this.json(res, readKnowledgeStatus(cwd).index);
+                }
+                if (method === 'POST' && action === 'recommend') {
+                    const body = await readJson(req);
+                    return this.json(res, await recommendRagProviders(cwd, { refreshWeb: body.refreshWeb === true }));
+                }
+                if (method === 'GET' && action === 'recommendations') {
+                    return this.json(res, readRagProviderRecommendations(cwd) || emptyRagProviderRecommendations(cwd));
+                }
+                if (method === 'POST' && action === 'recommendations/apply') {
+                    const body = await readJson(req);
+                    return this.json(res, await applyRagProviderRecommendation(cwd, String(body.profileId || '')));
+                }
+                if (method === 'POST' && action === 'recommendations/apply-local') {
+                    const body = await readJson(req);
+                    return this.json(res, await applyAndPrepareLocalRagProviderRecommendation(cwd, String(body.profileId || ''), body));
+                }
+                if (method === 'POST' && action === 'actions') {
+                    const body = await readJson(req);
+                    return this.json(res, await runRagRecommendationAction(cwd, body.action, body));
+                }
+                if (method === 'POST' && action === 'search') {
+                    const body = await readJson(req);
+                    return this.json(res, await searchKnowledgeAsync(cwd, String(body.query || ''), body.filters || {}));
                 }
             }
             if (method === 'GET' && url.pathname === '/api/runs') {
@@ -252,7 +387,11 @@ export class WorkflowAppServer {
             const cancelMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/cancel$/);
             if (method === 'POST' && cancelMatch) {
                 const run = this.requireRun(decodeURIComponent(cancelMatch[1]));
-                await this.cancelRun(run);
+                const body = await readJson(req);
+                await this.cancelRun(run, {
+                    source: String(body.source || 'api'),
+                    reason: String(body.reason || 'manual cancel'),
+                });
                 return this.json(res, { ok: true, runId: run.id });
             }
             const compactMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/agents\/([^/]+)\/compact$/);
@@ -358,12 +497,21 @@ export class WorkflowAppServer {
         this.broadcast('run.updated', run);
     }
 
-    private async cancelRun(run: WorkflowRun): Promise<void> {
+    private async cancelRun(run: WorkflowRun, options: { source?: string; reason?: string } = {}): Promise<void> {
         this.queue = this.queue.filter(q => q.id !== run.id);
         if (TERMINAL.has(run.status)) return;
         const controller = this.controllers.get(run.id);
-        if (controller) await controller.cancel();
+        run.artifacts.cancelRequestedAt = new Date().toISOString();
+        run.artifacts.cancelSource = normalizeCancelSource(options.source);
+        run.artifacts.cancelReason = options.reason || 'manual cancel';
+        if (controller) await controller.cancel({ source: run.artifacts.cancelSource, reason: run.artifacts.cancelReason });
         run.status = 'cancelled';
+        run.artifacts.finalSummary = cancelSummary(run.artifacts.cancelSource, run.artifacts.cancelReason);
+        new CodexWorkflowStore(run.cwd).saveRun(run);
+        this.releaseRun(run.id);
+        this.broadcast('run.updated', run);
+        this.drainQueue();
+        return;
         run.artifacts.finalSummary = '사용자가 워크플로우를 취소했습니다.';
         new CodexWorkflowStore(run.cwd).saveRun(run);
         this.releaseRun(run.id);
@@ -466,6 +614,25 @@ export class WorkflowAppServer {
         } finally {
             await runtime.stop().catch(() => undefined);
         }
+    }
+
+    private openKnowledgeTarget(cwd: string, target: string): { ok: boolean; target: string; path?: string; error?: string } {
+        const status = readKnowledgeStatus(cwd);
+        const vaultPath = status.vault?.path || path.join(cwd, '.ai-agent', 'knowledge-vault');
+        const targetPath = target === 'obsidian'
+            ? path.join(vaultPath, 'obsidian')
+            : path.join(vaultPath, 'llms.txt');
+        if (!fs.existsSync(targetPath)) {
+            return { ok: false, target, path: targetPath, error: 'Knowledge target does not exist. Export the knowledge vault first.' };
+        }
+        if (process.platform === 'win32') {
+            spawn('cmd.exe', ['/c', 'start', '', targetPath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+        } else if (process.platform === 'darwin') {
+            spawn('open', [targetPath], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+            spawn('xdg-open', [targetPath], { detached: true, stdio: 'ignore' }).unref();
+        }
+        return { ok: true, target, path: targetPath };
     }
 
     private onControllerEvent(runIdHint: string | undefined, event: CodexWorkflowEvent): void {
@@ -755,6 +922,14 @@ export class WorkflowAppServer {
         ));
         checks.push(writerLockDirectoryCheck(projectRoot));
         checks.push(gitRoutingMutexCheck(projectRoot));
+        checks.push(updateLockCheck());
+        checks.push(check(
+            'auto-update-mode',
+            'Workflow auto update',
+            readWorkflowUpdateConfig().autoUpdateMode === 'off' ? 'warn' : 'ok',
+            `mode=${readWorkflowUpdateConfig().autoUpdateMode || 'autoWhenIdle'}, interval=${readWorkflowUpdateConfig().updateIntervalSec || 300}s`,
+            'Use the Update panel to enable autoWhenIdle if you want automatic updates while the app is idle.'
+        ));
         checks.push(check(
             'api-auth',
             'API browser auth',
@@ -853,6 +1028,18 @@ export class WorkflowAppServer {
         const cookie = cookieValue(req, AUTH_COOKIE_NAME);
         return [header, auth, query, cookie].some(value => value && timingSafeEqual(value, this.authToken));
     }
+
+    private updateRuntimeBlockers(): string[] {
+        const blockers: string[] = [];
+        if (this.active.size > 0) blockers.push(`active workflow runs: ${this.active.size}`);
+        if (this.waiting.size > 0) blockers.push(`approval-waiting workflow runs: ${this.waiting.size}`);
+        if (this.queue.length > 0) blockers.push(`queued workflow runs: ${this.queue.length}`);
+        const pendingApprovals = this.listRuns()
+            .filter(run => !TERMINAL.has(run.status))
+            .reduce((count, run) => count + (run.approvalRequests || []).filter(approval => approval.status === 'pending').length, 0);
+        if (pendingApprovals > 0) blockers.push(`pending approvals: ${pendingApprovals}`);
+        return blockers;
+    }
 }
 
 export function openWorkflowApp(url: string): void {
@@ -897,6 +1084,10 @@ export function readWorkflowAppConfig(): WorkflowAppConfig {
             projectRoot: typeof raw.projectRoot === 'string' ? raw.projectRoot : undefined,
             codexExecutablePath: typeof raw.codexExecutablePath === 'string' ? raw.codexExecutablePath : undefined,
             port: Number.isFinite(Number(raw.port)) ? Number(raw.port) : undefined,
+            autoUpdateMode: normalizeAutoUpdateMode(raw.autoUpdateMode),
+            updateIntervalSec: Number.isFinite(Number(raw.updateIntervalSec)) ? Number(raw.updateIntervalSec) : undefined,
+            updateRemote: typeof raw.updateRemote === 'string' ? raw.updateRemote : undefined,
+            updateBranch: typeof raw.updateBranch === 'string' ? raw.updateBranch : undefined,
         };
     } catch {
         return {};
@@ -1011,6 +1202,23 @@ function gitRoutingMutexCheck(cwd: string): DiagnosticCheck {
     }
 }
 
+function updateLockCheck(): DiagnosticCheck {
+    try {
+        const lock = readUpdateLock();
+        if (!lock) return check('workflow-update-lock', 'Workflow update lock', 'ok', 'No active update lock.');
+        const status: DiagnosticCheck['status'] = lock.status === 'active' ? 'warn' : lock.status === 'stale' ? 'warn' : 'ok';
+        return check(
+            'workflow-update-lock',
+            'Workflow update lock',
+            status,
+            `status=${lock.status}, pid=${lock.pid || 'unknown'}, updatedAt=${lock.updatedAt || 'unknown'}${lock.staleReason ? `, reason=${lock.staleReason}` : ''}`,
+            'If the update lock stays stale, retry update from the Workflow App after confirming no updater process is running.'
+        );
+    } catch (e: any) {
+        return check('workflow-update-lock', 'Workflow update lock', 'unknown', e?.message || String(e), 'Check ~/.codex-workflow/update.lock manually.');
+    }
+}
+
 function gitCredentialCheck(cwd: string): DiagnosticCheck {
     try {
         const helper = spawnSync('git', ['config', '--get', 'credential.helper'], {
@@ -1098,6 +1306,16 @@ function normalizeRunKind(value: any): WorkflowRunKind {
     const runKind = String(value || 'multiAgent');
     const allowed = ['automation', 'readOnly', 'approvalRequired', 'multiAgent', 'contextControl', 'codeChange', 'gitOperation'];
     return allowed.includes(runKind) ? runKind as WorkflowRunKind : 'multiAgent';
+}
+
+function normalizeCancelSource(value: any): WorkflowCancelSource {
+    const source = String(value || 'api');
+    return source === 'ui' || source === 'api' || source === 'smoke-watchdog' || source === 'system' ? source as WorkflowCancelSource : 'api';
+}
+
+function cancelSummary(source: WorkflowCancelSource | undefined, reason: string | undefined): string {
+    const sourceLabel = source === 'smoke-watchdog' ? 'smoke watchdog' : source || 'api';
+    return `Codex Workflow cancelled by ${sourceLabel}: ${reason || 'manual cancel'}`;
 }
 
 function writeLockKey(cwd: string, runKind: WorkflowRunKind): string | null {

@@ -2,6 +2,15 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { CODEX_WORKFLOW_ROLES, CodexWorkflowRole } from './store';
+import {
+    buildAgentKnowledgeContext,
+    exportKnowledgeVault,
+    formatAgentKnowledgeContext,
+    readKnowledgeConfig,
+    readKnowledgeStatus,
+    rebuildLocalKnowledgeIndex,
+    KnowledgeStatus,
+} from './knowledge';
 
 export interface DocumentRule {
     include: string[];
@@ -57,6 +66,7 @@ export interface DocumentCacheState {
     scanned: ScannedDocument[];
     summaries: DocumentSummaryCache[];
     bundles: AgentDocumentBundleCache[];
+    knowledge?: KnowledgeStatus;
 }
 
 export type CodexTextRunner = (prompt: string, purpose: string) => Promise<string>;
@@ -92,6 +102,11 @@ export function defaultDocumentProfile(): ProjectDocumentProfile {
             'doc-writer': { include: ['docs/**/*.md', 'README.md'], exclude: [], summaryMode: 'summary' },
             designer: { include: ['docs/design/**/*.md', 'docs/ui/**/*.md', '**/*design*.md', '**/*ux*.md'], exclude: [], summaryMode: 'summary' },
             'web-researcher': { include: ['README.md', 'docs/**/*.md'], exclude: [], summaryMode: 'summary' },
+            'knowledge-source-agent': { include: ['README.md', 'llms.txt', 'docs/**/*.md', '.codex/**/*.md', '.codex/agents/*.toml'], exclude: [], summaryMode: 'summary' },
+            'knowledge-index-agent': { include: ['README.md', 'llms.txt', 'docs/**/*.md', '.codex/workflow-knowledge.json'], exclude: [], summaryMode: 'summary' },
+            'rag-retriever-agent': { include: ['README.md', 'llms.txt', 'docs/**/*.md', '.codex/workflow-knowledge.json'], exclude: [], summaryMode: 'summary' },
+            'knowledge-auditor-agent': { include: ['README.md', 'AGENTS.md', 'llms.txt', 'docs/**/*.md', '.codex/**/*.toml', '.codex/**/*.json'], exclude: [], summaryMode: 'summary' },
+            'wiki-export-agent': { include: ['README.md', 'llms.txt', 'docs/**/*.md', '.codex/workflow-knowledge.json'], exclude: [], summaryMode: 'summary' },
         },
     };
 }
@@ -156,7 +171,7 @@ export function readDocumentCacheState(cwd: string): DocumentCacheState {
     const bundles = CODEX_WORKFLOW_ROLES
         .map(role => readAgentBundle(cwd, role, bundleProfileHash(profile, scanned, role)))
         .filter((entry): entry is AgentDocumentBundleCache => !!entry);
-    return { profile, scanned, summaries, bundles };
+    return { profile, scanned, summaries, bundles, knowledge: readKnowledgeStatus(cwd) };
 }
 
 export async function recommendDocumentProfile(cwd: string, runner: CodexTextRunner): Promise<{ profile: ProjectDocumentProfile; scanned: ScannedDocument[]; raw: string; reasons: any[]; error?: string }> {
@@ -196,6 +211,10 @@ export async function recommendDocumentProfile(cwd: string, runner: CodexTextRun
 }
 
 export async function rebuildDocumentCache(cwd: string, runner: CodexTextRunner, roles?: string[]): Promise<DocumentCacheState> {
+    const knowledgeConfig = readKnowledgeConfig(cwd);
+    rebuildLocalKnowledgeIndex(cwd, knowledgeConfig);
+    if (knowledgeConfig.writeGeneratedVault) exportKnowledgeVault(cwd);
+
     const profile = readDocumentProfile(cwd);
     const scanned = scanProjectDocuments(cwd, profile);
     const targetRoles = (roles && roles.length ? roles : [...CODEX_WORKFLOW_ROLES]).filter(role => CODEX_WORKFLOW_ROLES.includes(role as CodexWorkflowRole));
@@ -244,14 +263,13 @@ export function agentDocumentContext(cwd: string, role: string): string {
     const scanned = scanProjectDocuments(cwd, profile);
     const currentHashes = new Map(scanned.map(doc => [doc.path, doc.hash]));
     const bundle = readAgentBundle(cwd, role, bundleProfileHash(profile, scanned, role));
-    if (bundle) {
-        return formatAgentBundle(bundle);
-    }
+    const knowledgeContext = formatKnowledgeContext(cwd, role);
+    if (bundle) return [formatAgentBundle(bundle), knowledgeContext].filter(Boolean).join('\n\n');
     const docs = docsForAgent(profile, scanned, role as CodexWorkflowRole)
         .map(doc => readSummaryCache(cwd, doc.path))
         .filter((entry): entry is DocumentSummaryCache => !!entry && entry.hash === currentHashes.get(entry.path));
-    if (docs.length === 0) return '';
-    return formatAgentBundle({
+    if (docs.length === 0) return knowledgeContext;
+    return [formatAgentBundle({
         role,
         profileHash: bundleProfileHash(profile, scanned, role),
         sourceDocs: docs.map(doc => doc.path),
@@ -259,7 +277,16 @@ export function agentDocumentContext(cwd: string, role: string): string {
         mustFollow: Array.from(new Set(docs.flatMap(doc => doc.rules || []))),
         warnings: Array.from(new Set(docs.flatMap(doc => doc.warnings || []))),
         updatedAt: new Date().toISOString(),
-    });
+    }), knowledgeContext].filter(Boolean).join('\n\n');
+}
+
+function formatKnowledgeContext(cwd: string, role: string): string {
+    try {
+        const query = `${role} project rules docs rag knowledge citations implementation constraints`;
+        return formatAgentKnowledgeContext(buildAgentKnowledgeContext(cwd, role, query));
+    } catch {
+        return '';
+    }
 }
 
 export function bundleProfileHash(profile: ProjectDocumentProfile, scanned: ScannedDocument[], role: string): string {

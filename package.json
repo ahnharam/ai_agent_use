@@ -249,9 +249,10 @@
     "vscode:prepublish": "npm run compile",
     "compile": "npm run compile:extension && npm run compile:workflow",
     "compile:extension": "esbuild src/extension.ts --bundle --platform=node --external:vscode --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk --outfile=out/extension.js",
-    "compile:workflow": "esbuild src/workflowApp/cli.ts --bundle --platform=node --outfile=out/workflow-app/cli.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk && esbuild src/workflowApp/electronMain.ts --bundle --platform=node --outfile=out/workflow-app/electronMain.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk",
+    "compile:workflow": "esbuild src/workflowApp/cli.ts --bundle --platform=node --outfile=out/workflow-app/cli.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk && esbuild src/workflowApp/electronMain.ts --bundle --platform=node --outfile=out/workflow-app/electronMain.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk && esbuild src/workflowApp/updater.ts --bundle --platform=node --outfile=out/workflow-app/updater.js --external:electron --external:@openai/codex-sdk --external:@modelcontextprotocol/sdk",
     "workflow:serve": "node out/workflow-app/cli.js --open",
     "workflow:electron": "npx electron out/workflow-app/electronMain.js",
+    "workflow:smoke:app-server": "node scripts/test-workflow-appserver-smoke.mjs",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile"
   },

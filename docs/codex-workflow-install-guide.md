@@ -178,7 +178,29 @@ local app 설정과 token은 PC별로 저장된다.
 %USERPROFILE%\.codex-workflow\token
 ```
 
-`config.json`에는 `projectRoot`, `codexExecutablePath`, `port`만 저장한다. token은 별도 파일에 유지한다.
+`config.json`에는 `projectRoot`, `codexExecutablePath`, `port`와 Workflow App 자동 업데이트 설정을 저장한다. token은 별도 파일에 유지한다.
+
+자동 업데이트 관련 기본값:
+
+```json
+{
+  "autoUpdateMode": "autoWhenIdle",
+  "updateIntervalSec": 300,
+  "updateRemote": "origin"
+}
+```
+
+Workflow App header의 `업데이트` 버튼에서 원격 Git 업데이트 상태, blocker, 최근 로그를 확인할 수 있다. 자동 적용은 active/queued run, 승인 대기, dirty source diff, writer lock, updater lock이 없을 때만 진행한다. 업데이트 적용 중에는 별도 updater helper가 `git pull --ff-only`, 필요 시 `npm ci`, `npm run compile`, plugin cache refresh, 앱 재시작, `/api/health` 검증을 순서대로 수행한다.
+
+업데이트 API:
+
+```powershell
+$token = (Get-Content -Raw "$env:USERPROFILE\.codex-workflow\token").Trim()
+$headers = @{ "x-codex-workflow-token" = $token }
+Invoke-RestMethod http://127.0.0.1:48731/api/update/status -Headers $headers
+Invoke-RestMethod -Method Post http://127.0.0.1:48731/api/update/check -Headers $headers
+Invoke-RestMethod -Method Post http://127.0.0.1:48731/api/update/apply -Headers $headers
+```
 
 ## Diagnostics
 

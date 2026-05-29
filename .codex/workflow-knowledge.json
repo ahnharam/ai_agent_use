@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "mode": "own",
+  "preferred": "local-first",
+  "fallback": "local-hybrid",
+  "citationRequired": true,
+  "writeGeneratedVault": true,
+  "generatedVaultDir": ".ai-agent/knowledge-vault",
+  "include": [
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "llms.txt",
+    "llms-full.txt",
+    "package.json",
+    "tsconfig.json",
+    "system_schema.json",
+    ".codex/**/*.md",
+    ".codex/agents/*.toml",
+    "docs/**/*.md",
+    "docs/**/*.mdx",
+    "docs/**/*.txt",
+    "docs/**/*.html",
+    "docs/**/*.htm",
+    "docs/**/*.json"
+  ],
+  "exclude": [
+    ".git/**",
+    "node_modules/**",
+    "dist/**",
+    "build/**",
+    "out/**",
+    "coverage/**",
+    ".ai-agent/runs/**",
+    ".ai-agent/doc-cache/**",
+    ".ai-agent/knowledge-vault/**",
+    ".env",
+    ".env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*token*",
+    "**/*credential*",
+    ".obsidian/workspace*.json",
+    "_agents/*/tools/*.json",
+    "**/oauth*.json"
+  ],
+  "sources": [],
+  "embedding": {
+    "provider": "ollama",
+    "model": "bge-m3",
+    "baseUrl": "http://127.0.0.1:11435",
+    "externalData": false
+  },
+  "vectorDb": {
+    "provider": "qdrant",
+    "url": "http://127.0.0.1:6333",
+    "collectionPrefix": "codex_workflow",
+    "mode": "managed"
+  },
+  "recommendation": {
+    "appliedProfileId": "local-qdrant-ollama-bge-m3",
+    "appliedAt": "2026-05-29T06:54:45.834Z",
+    "lastRecommendedAt": "2026-05-29T06:47:40.158Z"
+  },
+  "integration": {
+    "strategy": "absorb-copy-own-index",
+    "sourceOwnership": "project",
+    "derivedOwnership": "workflow",
+    "existingRagRole": "baseline-and-fallback",
+    "activationMode": "eval-gated",
+    "activatedSurfaces": [
+      "capability-routing",
+      "project-policy"
+    ],
+    "lastActivatedAt": "2026-05-29T09:43:48.789Z",
+    "lastEvaluatedAt": "2026-05-29T09:43:48.780Z"
+  }
+}

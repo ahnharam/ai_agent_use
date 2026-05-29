@@ -2,6 +2,8 @@ param(
     [string]$ProjectRoot = "",
     [string]$CodexExecutablePath = "",
     [int]$Port = 48731,
+    [ValidateSet("off", "notify", "autoWhenIdle")]
+    [string]$AutoUpdateMode = "autoWhenIdle",
     [switch]$SkipNpmInstall,
     [switch]$SkipMarketplace,
     [switch]$StartApp
@@ -108,6 +110,9 @@ function Save-WorkflowConfig {
         projectRoot = $Root
         codexExecutablePath = $CodexPath
         port = $AppPort
+        autoUpdateMode = $AutoUpdateMode
+        updateIntervalSec = 300
+        updateRemote = "origin"
     }
     $json = $config | ConvertTo-Json -Depth 4
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

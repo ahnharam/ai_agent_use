@@ -120,13 +120,25 @@ async function handleMessage(msg) {
       id: msg.id,
       result: {
         protocolVersion: msg.params?.protocolVersion || '2024-11-05',
-        capabilities: { tools: {} },
+        capabilities: { tools: {}, resources: {} },
         serverInfo: { name: 'codex-workflow', version: '0.1.0' }
       }
     });
   }
   if (msg.method === 'tools/list') {
     return send({ id: msg.id, result: { tools } });
+  }
+  if (msg.method === 'resources/list') {
+    return send({ id: msg.id, result: { resources: listResources() } });
+  }
+  if (msg.method === 'resources/read') {
+    try {
+      const uri = msg.params?.uri || '';
+      const content = await readResource(uri);
+      return send({ id: msg.id, result: { contents: [content] } });
+    } catch (err) {
+      return send({ id: msg.id, error: { code: -32000, message: err.message || String(err) } });
+    }
   }
   if (msg.method === 'tools/call') {
     try {
@@ -150,6 +162,42 @@ async function handleMessage(msg) {
   if (msg.id !== undefined) {
     send({ id: msg.id, error: { code: -32601, message: `Unknown method: ${msg.method}` } });
   }
+}
+
+function listResources() {
+  return [
+    { uri: 'llms://project/index', name: 'Workflow knowledge llms.txt', mimeType: 'text/markdown' },
+    { uri: 'vault://project/manifest', name: 'Workflow knowledge manifest', mimeType: 'application/json' },
+    { uri: 'rag://project/status', name: 'Workflow RAG status', mimeType: 'application/json' },
+    { uri: 'rag://project/search?q=workflow%20knowledge', name: 'Workflow RAG search template', mimeType: 'application/json' }
+  ];
+}
+
+async function readResource(uri) {
+  await ensureWorkflowApp();
+  if (uri === 'llms://project/index') {
+    const data = await request('GET', `/api/projects/${encodeURIComponent(PROJECT_ROOT)}/knowledge/status`);
+    const llmsPath = path.join(data?.vault?.path || path.join(PROJECT_ROOT, '.ai-agent', 'knowledge-vault'), 'llms.txt');
+    if (!fs.existsSync(llmsPath)) throw new Error('llms.txt is not generated. Export the knowledge vault first.');
+    return { uri, mimeType: 'text/markdown', text: fs.readFileSync(llmsPath, 'utf8') };
+  }
+  if (uri === 'vault://project/manifest') {
+    const data = await request('GET', `/api/projects/${encodeURIComponent(PROJECT_ROOT)}/knowledge/status`);
+    const manifestPath = path.join(data?.vault?.path || path.join(PROJECT_ROOT, '.ai-agent', 'knowledge-vault'), 'manifest.json');
+    if (!fs.existsSync(manifestPath)) throw new Error('manifest.json is not generated. Export the knowledge vault first.');
+    return { uri, mimeType: 'application/json', text: fs.readFileSync(manifestPath, 'utf8') };
+  }
+  if (uri === 'rag://project/status') {
+    const data = await request('GET', `/api/projects/${encodeURIComponent(PROJECT_ROOT)}/rag/status`);
+    return { uri, mimeType: 'application/json', text: JSON.stringify(data, null, 2) };
+  }
+  if (uri.startsWith('rag://project/search')) {
+    const parsed = new URL(uri);
+    const query = parsed.searchParams.get('q') || 'workflow knowledge';
+    const data = await request('POST', `/api/projects/${encodeURIComponent(PROJECT_ROOT)}/rag/search`, { query });
+    return { uri, mimeType: 'application/json', text: JSON.stringify(data, null, 2) };
+  }
+  throw new Error(`Unknown resource: ${uri}`);
 }
 
 async function callTool(name, args) {
